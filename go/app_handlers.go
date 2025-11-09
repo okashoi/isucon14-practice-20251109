@@ -210,17 +210,85 @@ func appGetRides(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items := []getAppRidesResponseItem{}
+	// 完了したライドのみをフィルタリングし、chair_idを収集
+	completedRides := []Ride{}
 	for _, ride := range rides {
 		status, err := getLatestRideStatus(ctx, tx, ride.ID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		if status != "COMPLETED" {
-			continue
+		if status == "COMPLETED" {
+			completedRides = append(completedRides, ride)
 		}
+	}
 
+	if len(completedRides) == 0 {
+		if err := tx.Commit(); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, &getAppRidesResponse{
+			Rides: []getAppRidesResponseItem{},
+		})
+		return
+	}
+
+	// chair_idを収集
+	chairIDs := []string{}
+	for _, ride := range completedRides {
+		if ride.ChairID.Valid {
+			chairIDs = append(chairIDs, ride.ChairID.String)
+		}
+	}
+
+	// 椅子情報を一括取得
+	chairMap := make(map[string]*Chair)
+	if len(chairIDs) > 0 {
+		chairs := []Chair{}
+		query, args, err := sqlx.In(`SELECT * FROM chairs WHERE id IN (?)`, chairIDs)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		query = tx.Rebind(query)
+		if err := tx.SelectContext(ctx, &chairs, query, args...); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		for i := range chairs {
+			chairMap[chairs[i].ID] = &chairs[i]
+		}
+	}
+
+	// owner_idを収集
+	ownerIDs := []string{}
+	for _, chair := range chairMap {
+		ownerIDs = append(ownerIDs, chair.OwnerID)
+	}
+
+	// オーナー情報を一括取得
+	ownerMap := make(map[string]*Owner)
+	if len(ownerIDs) > 0 {
+		owners := []Owner{}
+		query, args, err := sqlx.In(`SELECT * FROM owners WHERE id IN (?)`, ownerIDs)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		query = tx.Rebind(query)
+		if err := tx.SelectContext(ctx, &owners, query, args...); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		for i := range owners {
+			ownerMap[owners[i].ID] = &owners[i]
+		}
+	}
+
+	// レスポンスを組み立て
+	items := []getAppRidesResponseItem{}
+	for _, ride := range completedRides {
 		fare, err := calculateDiscountedFare(ctx, tx, user.ID, &ride, ride.PickupLatitude, ride.PickupLongitude, ride.DestinationLatitude, ride.DestinationLongitude)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -237,23 +305,18 @@ func appGetRides(w http.ResponseWriter, r *http.Request) {
 			CompletedAt:           ride.UpdatedAt.UnixMilli(),
 		}
 
-		item.Chair = getAppRidesResponseItemChair{}
-
-		chair := &Chair{}
-		if err := tx.GetContext(ctx, chair, `SELECT * FROM chairs WHERE id = ?`, ride.ChairID); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
+		if ride.ChairID.Valid {
+			chair := chairMap[ride.ChairID.String]
+			if chair != nil {
+				owner := ownerMap[chair.OwnerID]
+				item.Chair = getAppRidesResponseItemChair{
+					ID:    chair.ID,
+					Name:  chair.Name,
+					Model: chair.Model,
+					Owner: owner.Name,
+				}
+			}
 		}
-		item.Chair.ID = chair.ID
-		item.Chair.Name = chair.Name
-		item.Chair.Model = chair.Model
-
-		owner := &Owner{}
-		if err := tx.GetContext(ctx, owner, `SELECT * FROM owners WHERE id = ?`, chair.OwnerID); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		item.Chair.Owner = owner.Name
 
 		items = append(items, item)
 	}
