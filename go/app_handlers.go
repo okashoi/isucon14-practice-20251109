@@ -929,26 +929,84 @@ func appGetNearbyChairs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// N+1解消: 最初にすべてのアクティブなchairのridesを取得
+	activeChairIDs := make([]string, 0)
+	for _, chair := range chairs {
+		if chair.IsActive {
+			activeChairIDs = append(activeChairIDs, chair.ID)
+		}
+	}
+
+	// すべてのridesを一括取得
+	chairRidesMap := make(map[string][]*Ride)
+	if len(activeChairIDs) > 0 {
+		query, args, err := sqlx.In(
+			`SELECT * FROM rides WHERE chair_id IN (?) ORDER BY chair_id, created_at DESC`,
+			activeChairIDs,
+		)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		query = tx.Rebind(query)
+
+		var allRides []*Ride
+		if err := tx.SelectContext(ctx, &allRides, query, args...); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		for _, ride := range allRides {
+			chairRidesMap[ride.ChairID.String] = append(chairRidesMap[ride.ChairID.String], ride)
+		}
+	}
+
+	// すべてのride_idを収集
+	allRideIDs := make([]string, 0)
+	for _, rides := range chairRidesMap {
+		for _, ride := range rides {
+			allRideIDs = append(allRideIDs, ride.ID)
+		}
+	}
+
+	// WHERE ride_id IN (...) で最新statusを一括取得
+	rideLatestStatuses := make(map[string]string)
+	if len(allRideIDs) > 0 {
+		query, args, err := sqlx.In(
+			`SELECT ride_id, status FROM (SELECT ride_id, status FROM ride_statuses WHERE ride_id IN (?) ORDER BY created_at DESC) AS rs GROUP BY ride_id`,
+			allRideIDs,
+		)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		query = tx.Rebind(query)
+
+		type rideStatus struct {
+			RideID string `db:"ride_id"`
+			Status string `db:"status"`
+		}
+		var statuses []rideStatus
+		if err := tx.SelectContext(ctx, &statuses, query, args...); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		for _, s := range statuses {
+			rideLatestStatuses[s.RideID] = s.Status
+		}
+	}
+
 	nearbyChairs := []appGetNearbyChairsResponseChair{}
 	for _, chair := range chairs {
 		if !chair.IsActive {
 			continue
 		}
 
-		rides := []*Ride{}
-		if err := tx.SelectContext(ctx, &rides, `SELECT * FROM rides WHERE chair_id = ? ORDER BY created_at DESC`, chair.ID); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
+		rides := chairRidesMap[chair.ID]
 
 		skip := false
 		for _, ride := range rides {
 			// 過去にライドが存在し、かつ、それが完了していない場合はスキップ
-			status, err := getLatestRideStatus(ctx, tx, ride.ID)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, err)
-				return
-			}
+			status := rideLatestStatuses[ride.ID]
 			if status != "COMPLETED" {
 				skip = true
 				break
