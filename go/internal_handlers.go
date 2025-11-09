@@ -19,22 +19,22 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// pickup座標に近い椅子を最大5件取得
+	// pickup座標に近い椅子を最大10件取得
 	nearbyChairs := []Chair{}
 	query := `
-		SELECT c.* 
+		SELECT c.*
 		FROM chairs c
 		INNER JOIN (
-			SELECT cl1.chair_id, cl1.latitude, cl1.longitude
-			FROM chair_locations cl1
-			INNER JOIN (
-				SELECT cl.chair_id, MAX(cl.created_at) AS max_created_at
-				FROM chair_locations cl
-				INNER JOIN chairs c ON cl.chair_id = c.id
-				WHERE c.is_active = TRUE
-				GROUP BY cl.chair_id
-			) cl2 ON cl1.chair_id = cl2.chair_id AND cl1.created_at = cl2.max_created_at
-		) cl ON c.id = cl.chair_id
+			SELECT 
+				chair_id,
+				latitude,
+				longitude,
+				ROW_NUMBER() OVER (PARTITION BY chair_id ORDER BY created_at DESC) AS rn
+			FROM chair_locations
+			WHERE chair_id IN (
+				SELECT id FROM chairs WHERE is_active = TRUE
+			)
+		) cl ON c.id = cl.chair_id AND cl.rn = 1
 		ORDER BY 
 			(cl.latitude - ?) * (cl.latitude - ?) + 
 			(cl.longitude - ?) * (cl.longitude - ?)
