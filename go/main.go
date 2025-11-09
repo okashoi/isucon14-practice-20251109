@@ -10,11 +10,12 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
-    "github.com/kaz/pprotein/integration"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
+	"github.com/kaz/pprotein/integration"
 )
 
 var db *sqlx.DB
@@ -114,6 +115,9 @@ func setup() http.Handler {
 
 	pproteinHandler := integration.NewDebugHandler()
 	go http.ListenAndServe(":3000", pproteinHandler)
+
+	// 座標情報のバルクインサート用ワーカーを起動
+	initCoordinateBulkInsert()
 
 	return mux
 }
