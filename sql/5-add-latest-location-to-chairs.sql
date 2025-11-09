@@ -1,9 +1,3 @@
--- chairsテーブルに最新位置カラムを追加
-ALTER TABLE chairs 
-  ADD COLUMN latest_latitude INTEGER NULL INVISIBLE COMMENT '最新の経度',
-  ADD COLUMN latest_longitude INTEGER NULL INVISIBLE COMMENT '最新の緯度',
-  ADD COLUMN latest_location_updated_at DATETIME(6) NULL INVISIBLE COMMENT '最新位置の更新日時';
-
 -- 既存データの最新位置を移行
 UPDATE chairs c
 INNER JOIN (
