@@ -22,40 +22,26 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 	// pickup座標に近い空いている椅子を取得してアサイン
 	matched := &Chair{}
 	query := `
-		WITH available_chairs AS (
-			-- 空いている椅子（is_activeでかつ未完了のrideがない）
-			SELECT c.id 
-			FROM chairs c
-			WHERE c.is_active = TRUE
-			AND NOT EXISTS (
-				SELECT 1
-				FROM rides r
-				WHERE r.chair_id = c.id
-				AND EXISTS (
-					SELECT 1
-					FROM ride_statuses rs
-					WHERE rs.ride_id = r.id
-					GROUP BY rs.ride_id
-					HAVING COUNT(rs.chair_sent_at) < 6
-				)
-			)
-		),
-		latest_locations AS (
-			-- 各椅子の最新位置
-			SELECT 
-				chair_id,
-				latitude,
-				longitude,
-				ROW_NUMBER() OVER (PARTITION BY chair_id ORDER BY created_at DESC) AS rn
-			FROM chair_locations
-			WHERE chair_id IN (SELECT id FROM available_chairs)
-		)
 		SELECT c.*
 		FROM chairs c
-		INNER JOIN latest_locations cl ON c.id = cl.chair_id AND cl.rn = 1
+		WHERE c.is_active = TRUE
+		AND c.latest_latitude IS NOT NULL
+		AND c.latest_longitude IS NOT NULL
+		AND NOT EXISTS (
+			SELECT 1
+			FROM rides r
+			WHERE r.chair_id = c.id
+			AND EXISTS (
+				SELECT 1
+				FROM ride_statuses rs
+				WHERE rs.ride_id = r.id
+				GROUP BY rs.ride_id
+				HAVING COUNT(rs.chair_sent_at) < 6
+			)
+		)
 		ORDER BY 
-			(cl.latitude - ?) * (cl.latitude - ?) + 
-			(cl.longitude - ?) * (cl.longitude - ?)
+			(c.latest_latitude - ?) * (c.latest_latitude - ?) + 
+			(c.latest_longitude - ?) * (c.latest_longitude - ?)
 		LIMIT 1
 	`
 	if err := db.GetContext(ctx, matched, query,
