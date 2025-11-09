@@ -195,30 +195,42 @@ func ownerGetChairs(w http.ResponseWriter, r *http.Request) {
 	owner := ctx.Value("owner").(*Owner)
 
 	chairs := []chairWithDetail{}
-	if err := db.SelectContext(ctx, &chairs, `SELECT id,
-       owner_id,
-       name,
-       access_token,
-       model,
-       is_active,
-       created_at,
-       updated_at,
-       IFNULL(total_distance, 0) AS total_distance,
-       total_distance_updated_at
-FROM chairs
-       LEFT JOIN (SELECT chair_id,
-                          SUM(IFNULL(distance, 0)) AS total_distance,
-                          MAX(created_at)          AS total_distance_updated_at
-                   FROM (SELECT chair_id,
-                                created_at,
-                                ABS(latitude - LAG(latitude) OVER (PARTITION BY chair_id ORDER BY created_at)) +
-                                ABS(longitude - LAG(longitude) OVER (PARTITION BY chair_id ORDER BY created_at)) AS distance
-                         FROM chair_locations) tmp
-                   GROUP BY chair_id) distance_table ON distance_table.chair_id = chairs.id
-WHERE owner_id = ?
-`, owner.ID); err != nil {
+	if err := db.SelectContext(ctx, &chairs, `SELECT id, owner_id, name, access_token, model, is_active, created_at, updated_at FROM chairs WHERE owner_id = ?`, owner.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+
+	// 各椅子の総距離を計算
+	type chairLocation struct {
+		Latitude  int       `db:"latitude"`
+		Longitude int       `db:"longitude"`
+		CreatedAt time.Time `db:"created_at"`
+	}
+
+	for i := range chairs {
+		var locations []chairLocation
+
+		if err := db.SelectContext(ctx, &locations,
+			"SELECT latitude, longitude, created_at FROM chair_locations WHERE chair_id = ? ORDER BY created_at",
+			chairs[i].ID); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		totalDistance := 0
+		for j := 1; j < len(locations); j++ {
+			distance := abs(locations[j].Latitude-locations[j-1].Latitude) +
+				abs(locations[j].Longitude-locations[j-1].Longitude)
+			totalDistance += distance
+		}
+
+		chairs[i].TotalDistance = totalDistance
+		if len(locations) > 0 {
+			chairs[i].TotalDistanceUpdatedAt = sql.NullTime{
+				Time:  locations[len(locations)-1].CreatedAt,
+				Valid: true,
+			}
+		}
 	}
 
 	res := ownerGetChairResponse{}
