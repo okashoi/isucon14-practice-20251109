@@ -210,13 +210,42 @@ func appGetRides(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items := []getAppRidesResponseItem{}
-	for _, ride := range rides {
-		status, err := getLatestRideStatus(ctx, tx, ride.ID)
+	// N+1解消: すべてのride_idを収集
+	rideIDs := make([]string, len(rides))
+	for i, ride := range rides {
+		rideIDs[i] = ride.ID
+	}
+
+	// WHERE ride_id IN (...) で最新ステータスを一括取得
+	rideLatestStatuses := make(map[string]string)
+	if len(rideIDs) > 0 {
+		query, args, err := sqlx.In(
+			`SELECT ride_id, status FROM (SELECT ride_id, status FROM ride_statuses WHERE ride_id IN (?) ORDER BY created_at DESC) AS rs GROUP BY ride_id`,
+			rideIDs,
+		)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		query = tx.Rebind(query)
+
+		type rideStatus struct {
+			RideID string `db:"ride_id"`
+			Status string `db:"status"`
+		}
+		var statuses []rideStatus
+		if err := tx.SelectContext(ctx, &statuses, query, args...); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		for _, s := range statuses {
+			rideLatestStatuses[s.RideID] = s.Status
+		}
+	}
+
+	items := []getAppRidesResponseItem{}
+	for _, ride := range rides {
+		status := rideLatestStatuses[ride.ID]
 		if status != "COMPLETED" {
 			continue
 		}
