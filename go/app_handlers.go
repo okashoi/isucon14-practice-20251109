@@ -803,19 +803,37 @@ func getChairStats(ctx context.Context, tx *sqlx.Tx, chairID string) (appGetNoti
 		return stats, err
 	}
 
-	totalRideCount := 0
-	totalEvaluation := 0.0
-	for _, ride := range rides {
-		rideStatuses := []RideStatus{}
-		err = tx.SelectContext(
-			ctx,
-			&rideStatuses,
-			`SELECT * FROM ride_statuses WHERE ride_id = ? ORDER BY created_at`,
-			ride.ID,
+	// N+1解消: すべてのride_idを収集
+	rideIDs := make([]string, len(rides))
+	for i, ride := range rides {
+		rideIDs[i] = ride.ID
+	}
+
+	// WHERE ride_id IN (...) ですべてのride_statusesを一括取得
+	rideStatusesMap := make(map[string][]RideStatus)
+	if len(rideIDs) > 0 {
+		query, args, err := sqlx.In(
+			`SELECT * FROM ride_statuses WHERE ride_id IN (?) ORDER BY ride_id, created_at`,
+			rideIDs,
 		)
 		if err != nil {
 			return stats, err
 		}
+		query = tx.Rebind(query)
+
+		var allStatuses []RideStatus
+		if err := tx.SelectContext(ctx, &allStatuses, query, args...); err != nil {
+			return stats, err
+		}
+		for _, status := range allStatuses {
+			rideStatusesMap[status.RideID] = append(rideStatusesMap[status.RideID], status)
+		}
+	}
+
+	totalRideCount := 0
+	totalEvaluation := 0.0
+	for _, ride := range rides {
+		rideStatuses := rideStatusesMap[ride.ID]
 
 		var arrivedAt, pickupedAt *time.Time
 		var isCompleted bool
