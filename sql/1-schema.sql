@@ -40,6 +40,7 @@ CREATE TABLE chairs
   COMMENT = '椅子情報テーブル';
 ALTER TABLE chairs ADD INDEX (owner_id);
 ALTER TABLE chairs ADD INDEX (access_token);
+ALTER TABLE chairs ADD INDEX (is_active);
 
 DROP TABLE IF EXISTS chair_locations;
 CREATE TABLE chair_locations
@@ -119,6 +120,7 @@ CREATE TABLE ride_statuses
 )
   COMMENT = 'ライドステータスの変更履歴テーブル';
 ALTER TABLE ride_statuses ADD INDEX (ride_id, created_at DESC, status);
+ALTER TABLE ride_statuses ADD INDEX (ride_id, chair_sent_at);
 
 DROP TABLE IF EXISTS owners;
 CREATE TABLE owners
