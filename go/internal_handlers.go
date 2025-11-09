@@ -123,13 +123,6 @@ func (mcf *MinCostFlow) Flow(s, t, maxFlow int) (flow, cost int) {
 	return flow, cost
 }
 
-// calculateDistanceSquared calculates squared distance between two points
-func calculateDistanceSquared(lat1, lon1, lat2, lon2 int) int {
-	dLat := lat1 - lat2
-	dLon := lon1 - lon2
-	return dLat*dLat + dLon*dLon
-}
-
 // ChairWithSpeed represents a chair with its speed information
 type ChairWithSpeed struct {
 	Chair
@@ -139,10 +132,10 @@ type ChairWithSpeed struct {
 // このAPIをインスタンス内から一定間隔で叩かせることで、椅子とライドをマッチングさせる
 func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	
+
 	// 全ての未マッチングリクエストを取得
 	rides := []Ride{}
-	if err := db.SelectContext(ctx, &rides, 
+	if err := db.SelectContext(ctx, &rides,
 		`SELECT * FROM rides WHERE chair_id IS NULL ORDER BY created_at`); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			w.WriteHeader(http.StatusNoContent)
@@ -156,6 +149,9 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	
+	// デバッグログ
+	// log.Printf("[Matching] Found %d unmatched rides", len(rides))
 
 	// 全ての利用可能な椅子をスピード情報付きで取得
 	chairs := []ChairWithSpeed{}
@@ -192,15 +188,17 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	
+	// デバッグログ
+	// log.Printf("[Matching] Found %d available chairs", len(chairs))
 
 	// 最小費用流グラフを構築
-	// 参考: https://github.com/ponyo877/isucon14/blob/fa9dbe439b1af705b175b166891d46a801e34719/go/internal_handlers.go#L129
 	// ノード番号: 0=source, 1~len(chairs)=chairs, len(chairs)+1~len(chairs)+len(rides)=rides, last=sink
 	numChairs := len(chairs)
 	numRides := len(rides)
 	source := 0
 	sink := 1 + numChairs + numRides
-	
+
 	mcf := NewMinCostFlow(sink + 1)
 
 	// source -> chairs (容量1, コスト0)
@@ -235,8 +233,11 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 	if numRides < maxPossibleFlow {
 		maxPossibleFlow = numRides
 	}
-	
+
 	flow, _ := mcf.Flow(source, sink, maxPossibleFlow)
+	
+	// デバッグログ
+	// log.Printf("[Matching] Flow result: %d", flow)
 
 	if flow == 0 {
 		w.WriteHeader(http.StatusNoContent)
@@ -275,6 +276,9 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// デバッグログ
+	// log.Printf("[Matching] Extracted %d matchings", len(matchings))
+	
 	if len(matchings) == 0 {
 		w.WriteHeader(http.StatusNoContent)
 		return
