@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"errors"
 	"net/http"
 	"strconv"
@@ -164,16 +163,16 @@ func calculateSale(ride Ride) int {
 }
 
 type chairWithDetail struct {
-	ID                     string       `db:"id"`
-	OwnerID                string       `db:"owner_id"`
-	Name                   string       `db:"name"`
-	AccessToken            string       `db:"access_token"`
-	Model                  string       `db:"model"`
-	IsActive               bool         `db:"is_active"`
-	CreatedAt              time.Time    `db:"created_at"`
-	UpdatedAt              time.Time    `db:"updated_at"`
-	TotalDistance          int          `db:"total_distance"`
-	TotalDistanceUpdatedAt sql.NullTime `db:"total_distance_updated_at"`
+	ID                     string     `db:"id"`
+	OwnerID                string     `db:"owner_id"`
+	Name                   string     `db:"name"`
+	AccessToken            string     `db:"access_token"`
+	Model                  string     `db:"model"`
+	IsActive               bool       `db:"is_active"`
+	CreatedAt              time.Time  `db:"created_at"`
+	UpdatedAt              time.Time  `db:"updated_at"`
+	TotalDistance          int        `db:"total_distance"`
+	TotalDistanceUpdatedAt *time.Time `db:"total_distance_updated_at"`
 }
 
 type ownerGetChairResponse struct {
@@ -195,42 +194,9 @@ func ownerGetChairs(w http.ResponseWriter, r *http.Request) {
 	owner := ctx.Value("owner").(*Owner)
 
 	chairs := []chairWithDetail{}
-	if err := db.SelectContext(ctx, &chairs, `SELECT id, owner_id, name, access_token, model, is_active, created_at, updated_at FROM chairs WHERE owner_id = ?`, owner.ID); err != nil {
+	if err := db.SelectContext(ctx, &chairs, `SELECT id, owner_id, name, access_token, model, is_active, created_at, updated_at, total_distance, total_distance_updated_at FROM chairs WHERE owner_id = ?`, owner.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
-	}
-
-	// 各椅子の総距離を計算
-	type chairLocation struct {
-		Latitude  int       `db:"latitude"`
-		Longitude int       `db:"longitude"`
-		CreatedAt time.Time `db:"created_at"`
-	}
-
-	for i := range chairs {
-		var locations []chairLocation
-
-		if err := db.SelectContext(ctx, &locations,
-			"SELECT latitude, longitude, created_at FROM chair_locations WHERE chair_id = ? ORDER BY created_at",
-			chairs[i].ID); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-
-		totalDistance := 0
-		for j := 1; j < len(locations); j++ {
-			distance := abs(locations[j].Latitude-locations[j-1].Latitude) +
-				abs(locations[j].Longitude-locations[j-1].Longitude)
-			totalDistance += distance
-		}
-
-		chairs[i].TotalDistance = totalDistance
-		if len(locations) > 0 {
-			chairs[i].TotalDistanceUpdatedAt = sql.NullTime{
-				Time:  locations[len(locations)-1].CreatedAt,
-				Valid: true,
-			}
-		}
 	}
 
 	res := ownerGetChairResponse{}
@@ -243,8 +209,8 @@ func ownerGetChairs(w http.ResponseWriter, r *http.Request) {
 			RegisteredAt:  chair.CreatedAt.UnixMilli(),
 			TotalDistance: chair.TotalDistance,
 		}
-		if chair.TotalDistanceUpdatedAt.Valid {
-			t := chair.TotalDistanceUpdatedAt.Time.UnixMilli()
+		if chair.TotalDistanceUpdatedAt != nil {
+			t := chair.TotalDistanceUpdatedAt.UnixMilli()
 			c.TotalDistanceUpdatedAt = &t
 		}
 		res.Chairs = append(res.Chairs, c)
