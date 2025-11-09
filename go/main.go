@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -19,6 +20,13 @@ import (
 )
 
 var db *sqlx.DB
+
+// 通知チャネル管理
+var (
+	appNotificationChannels   = make(map[string]chan struct{})
+	chairNotificationChannels = make(map[string]chan struct{})
+	notificationMutex         sync.RWMutex
+)
 
 func main() {
 	mux := setup()
@@ -147,6 +155,13 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+
+	// 通知チャネルをクリア
+	notificationMutex.Lock()
+	appNotificationChannels = make(map[string]chan struct{})
+	chairNotificationChannels = make(map[string]chan struct{})
+	notificationMutex.Unlock()
+
 	go func() {
 		if _, err := http.Get("http://54.238.146.225:9000/api/group/collect"); err != nil {
 			//log.Printf("failed to communicate with pprotein: %v", err)
