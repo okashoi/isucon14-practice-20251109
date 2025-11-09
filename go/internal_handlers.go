@@ -25,15 +25,16 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		SELECT c.* 
 		FROM chairs c
 		INNER JOIN (
-			SELECT chair_id, latitude, longitude
-			FROM chair_locations
-			WHERE (chair_id, created_at) IN (
-				SELECT chair_id, MAX(created_at)
-				FROM chair_locations
-				GROUP BY chair_id
-			)
+			SELECT cl1.chair_id, cl1.latitude, cl1.longitude
+			FROM chair_locations cl1
+			INNER JOIN (
+				SELECT cl.chair_id, MAX(cl.created_at) AS max_created_at
+				FROM chair_locations cl
+				INNER JOIN chairs c ON cl.chair_id = c.id
+				WHERE c.is_active = TRUE
+				GROUP BY cl.chair_id
+			) cl2 ON cl1.chair_id = cl2.chair_id AND cl1.created_at = cl2.max_created_at
 		) cl ON c.id = cl.chair_id
-		WHERE c.is_active = TRUE
 		ORDER BY 
 			(cl.latitude - ?) * (cl.latitude - ?) + 
 			(cl.longitude - ?) * (cl.longitude - ?)
