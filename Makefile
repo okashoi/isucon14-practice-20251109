@@ -6,8 +6,7 @@ gogo: stop-services build logs/clear start-services start-bench
 stop-services:
 	sudo systemctl stop nginx
 	sudo systemctl stop $(APPNAME)
-	sudo systemctl stop mysql
-	# ssh isucon-s2 "sudo systemctl stop mysql"
+	ssh isucon-s2 "sudo systemctl stop mysql"
 
 build:
 	cd go && go build -o isuride
@@ -24,15 +23,12 @@ logs/clear:
 	sudo journalctl --rotate && sudo journalctl --vacuum-size=1K
 	sudo truncate --size 0 /var/log/nginx/access.log
 	sudo truncate --size 0 /var/log/nginx/error.log
-	sudo truncate --size 0 /var/log/mysql/mysql-slow.log && sudo chmod 666 /var/log/mysql/mysql-slow.log
-	sudo truncate --size 0 /var/log/mysql/error.log
-	# ssh isucon-s2 "sudo truncate --size 0 /var/log/mysql/mysql-slow.log && chmod 666 /var/log/mysql/mysql-slow.log"
-	# ssh isucon-s2 "sudo truncate --size 0 /var/log/mysql/error.log"
+	ssh isucon-s2 "sudo truncate --size 0 /var/log/mysql/mysql-slow.log && sudo chmod 666 /var/log/mysql/mysql-slow.log"
+	ssh isucon-s2 "sudo truncate --size 0 /var/log/mysql/error.log"
 
 start-services:
 	sudo systemctl daemon-reload
-	# ssh isucon-s2 "sudo systemctl start mysql"
-	sudo systemctl start mysql
+	ssh isucon-s2 "sudo systemctl start mysql"
 	sudo systemctl start $(APPNAME)
 	sudo systemctl start nginx
 
@@ -51,4 +47,4 @@ pprof:
 	go tool pprof $(prof_file)
 
 start-bench:
-	ssh isucon-bench "./bench run . run --addr 172.31.6.255:443 --target https://isuride.xiv.isucon.net --payment-url http://172.31.2.189:12346 --payment-bind-port 1234 --skip-static-sanity-check"
+	ssh isucon-bench "./bench run . run --addr 172.31.6.255:443 --target https://isuride.xiv.isucon.net --payment-url http://172.31.2.189:12346 --payment-bind-port 12346 --skip-static-sanity-check"
