@@ -93,10 +93,13 @@ CREATE TABLE rides
   evaluation            INTEGER     NULL     COMMENT '評価',
   created_at            DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT '要求日時',
   updated_at            DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT '状態更新日時',
+  latest_status         ENUM ('MATCHING', 'ENROUTE', 'PICKUP', 'CARRYING', 'ARRIVED', 'COMPLETED') NULL INVISIBLE COMMENT '最新状態',
   PRIMARY KEY (id)
 )
   COMMENT = 'ライド情報テーブル';
 ALTER TABLE rides ADD INDEX (chair_id, updated_at DESC);
+ALTER TABLE rides ADD INDEX (user_id, latest_status);
+ALTER TABLE rides ADD INDEX (chair_id, latest_status);
 
 DROP TABLE IF EXISTS ride_statuses;
 CREATE TABLE ride_statuses
