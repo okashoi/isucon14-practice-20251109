@@ -62,5 +62,21 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// マッチング成立を即座に通知
+	notificationMutex.RLock()
+	if ch, ok := appNotificationChannels[ride.UserID]; ok {
+		select {
+		case ch <- struct{}{}:
+		default: // ブロッキング回避
+		}
+	}
+	if ch, ok := chairNotificationChannels[matched.ID]; ok {
+		select {
+		case ch <- struct{}{}:
+		default: // ブロッキング回避
+		}
+	}
+	notificationMutex.RUnlock()
+
 	w.WriteHeader(http.StatusNoContent)
 }
