@@ -51,4 +51,4 @@ pprof:
 	go tool pprof $(prof_file)
 
 start-bench:
-	ssh isucon-bench "./bench run . run --addr 172.31.6.255:443 --target https://isuride.xiv.isucon.net --payment-url http://172.31.2.189:12346 --payment-bind-port 1234 --skip-static-sanity-check"
+	ssh isucon-bench "./bench run . run --addr 172.31.6.255:443 --target https://isuride.xiv.isucon.net --payment-url http://172.31.2.189:12346 --payment-bind-port 12346 --skip-static-sanity-check"
