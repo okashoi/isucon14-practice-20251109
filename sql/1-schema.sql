@@ -142,3 +142,16 @@ CREATE TABLE coupons
   PRIMARY KEY (user_id, code)
 )
   COMMENT 'クーポンテーブル';
+
+DROP TRIGGER IF EXISTS trg_ride_statuses_after_insert;
+DELIMITER //
+CREATE TRIGGER trg_ride_statuses_after_insert
+AFTER INSERT ON ride_statuses
+FOR EACH ROW
+BEGIN
+  UPDATE rides
+    SET latest_status = NEW.status,
+        updated_at    = NEW.created_at
+  WHERE id = NEW.ride_id;
+END//
+DELIMITER ;
