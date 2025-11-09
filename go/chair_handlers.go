@@ -201,7 +201,95 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 未送信の状態遷移を全て送信
+	// チャネル登録
+	notifyChan := make(chan struct{}, 10)
+	notificationMutex.Lock()
+	chairNotificationChannels[chair.ID] = notifyChan
+	notificationMutex.Unlock()
+
+	defer func() {
+		notificationMutex.Lock()
+		delete(chairNotificationChannels, chair.ID)
+		notificationMutex.Unlock()
+		close(notifyChan)
+	}()
+
+	// 未送信の状態遷移を全て送信する関数
+	sendNotifications := func() {
+		tx, err := db.Beginx()
+		if err != nil {
+			return
+		}
+
+		ride := &Ride{}
+		if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
+			tx.Rollback()
+			if errors.Is(err, sql.ErrNoRows) {
+				return
+			}
+			return
+		}
+
+		// 未送信の状態を取得
+		yetSentRideStatuses := []RideStatus{}
+		if err := tx.SelectContext(ctx, &yetSentRideStatuses, `SELECT * FROM ride_statuses WHERE ride_id = ? AND chair_sent_at IS NULL ORDER BY created_at ASC`, ride.ID); err != nil {
+			tx.Rollback()
+			return
+		}
+
+		// 未送信の状態がない場合はスキップ
+		if len(yetSentRideStatuses) == 0 {
+			tx.Rollback()
+			return
+		}
+
+		user := &User{}
+		err = tx.GetContext(ctx, user, "SELECT * FROM users WHERE id = ? FOR SHARE", ride.UserID)
+		if err != nil {
+			tx.Rollback()
+			return
+		}
+
+		// 各未送信状態を順次送信
+		for _, rideStatus := range yetSentRideStatuses {
+			responseData := &chairGetNotificationResponseData{
+				RideID: ride.ID,
+				User: simpleUser{
+					ID:   user.ID,
+					Name: fmt.Sprintf("%s %s", user.Firstname, user.Lastname),
+				},
+				PickupCoordinate: Coordinate{
+					Latitude:  ride.PickupLatitude,
+					Longitude: ride.PickupLongitude,
+				},
+				DestinationCoordinate: Coordinate{
+					Latitude:  ride.DestinationLatitude,
+					Longitude: ride.DestinationLongitude,
+				},
+				Status: rideStatus.Status,
+			}
+
+			// SSE形式で送信
+			data, err := json.Marshal(responseData)
+			if err != nil {
+				tx.Rollback()
+				return
+			}
+			fmt.Fprintf(w, "data:%s\n\n", data)
+			flusher.Flush()
+
+			// 送信済みマーク
+			_, err = tx.ExecContext(ctx, `UPDATE ride_statuses SET chair_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, rideStatus.ID)
+			if err != nil {
+				tx.Rollback()
+				return
+			}
+		}
+
+		tx.Commit()
+	}
+
+	// フォールバック用のticker (500ms間隔)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -209,81 +297,12 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-notifyChan:
+			// マッチング成立時に即座に通知
+			sendNotifications()
 		case <-ticker.C:
-			tx, err := db.Beginx()
-			if err != nil {
-				return
-
-			}
-
-			ride := &Ride{}
-			if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
-				tx.Rollback()
-				if errors.Is(err, sql.ErrNoRows) {
-					continue
-				}
-				return
-			}
-
-			// 未送信の状態を取得
-			yetSentRideStatuses := []RideStatus{}
-			if err := tx.SelectContext(ctx, &yetSentRideStatuses, `SELECT * FROM ride_statuses WHERE ride_id = ? AND chair_sent_at IS NULL ORDER BY created_at ASC`, ride.ID); err != nil {
-				tx.Rollback()
-				return
-			}
-
-			// 未送信の状態がない場合はスキップ
-			if len(yetSentRideStatuses) == 0 {
-				tx.Rollback()
-				continue
-			}
-
-			user := &User{}
-			err = tx.GetContext(ctx, user, "SELECT * FROM users WHERE id = ? FOR SHARE", ride.UserID)
-			if err != nil {
-				tx.Rollback()
-				return
-			}
-
-			// 各未送信状態を順次送信
-			for _, rideStatus := range yetSentRideStatuses {
-				responseData := &chairGetNotificationResponseData{
-					RideID: ride.ID,
-					User: simpleUser{
-						ID:   user.ID,
-						Name: fmt.Sprintf("%s %s", user.Firstname, user.Lastname),
-					},
-					PickupCoordinate: Coordinate{
-						Latitude:  ride.PickupLatitude,
-						Longitude: ride.PickupLongitude,
-					},
-					DestinationCoordinate: Coordinate{
-						Latitude:  ride.DestinationLatitude,
-						Longitude: ride.DestinationLongitude,
-					},
-					Status: rideStatus.Status,
-				}
-
-				// SSE形式で送信
-				data, err := json.Marshal(responseData)
-				if err != nil {
-					tx.Rollback()
-					return
-				}
-				fmt.Fprintf(w, "data:%s\n\n", data)
-				flusher.Flush()
-
-				// 送信済みマーク
-				_, err = tx.ExecContext(ctx, `UPDATE ride_statuses SET chair_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, rideStatus.ID)
-				if err != nil {
-					tx.Rollback()
-					return
-				}
-			}
-
-			if err := tx.Commit(); err != nil {
-				return
-			}
+			// フォールバック: 定期的にもチェック
+			sendNotifications()
 		}
 	}
 }
