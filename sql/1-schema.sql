@@ -151,6 +151,8 @@ CREATE TABLE coupons
   PRIMARY KEY (user_id, code)
 )
   COMMENT 'クーポンテーブル';
+ALTER TABLE coupons ADD INDEX idx_used_by (used_by);
+ALTER TABLE coupons ADD INDEX (code);  
 
 DROP TRIGGER IF EXISTS trg_ride_statuses_after_insert;
 DELIMITER //
@@ -166,5 +168,4 @@ END//
 DELIMITER ;
 
 
-ALTER TABLE coupons ADD INDEX idx_used_by (used_by);
 
