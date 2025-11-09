@@ -1,0 +1,24 @@
+[
+  {
+    "id": "task-1762665505892-88e5a9",
+    "name": "SELECT `status` FROM `ride_statuses` WHERE `ride_id` = 'S' ORDER BY `created_at` DESC LIMIT NのクエリがN+1担っているようです。修正してほしい。",
+    "model": "Codex CLI",
+    "status": "running",
+    "importance": "low",
+    "urgency": "low",
+    "createdAt": "2025-11-09T05:18:25.892Z",
+    "updatedAt": "2025-11-09T05:19:20.638Z",
+    "requiresTerminal": true,
+    "createWorktree": false,
+    "branchName": null,
+    "baseBranch": null,
+    "useTmux": false,
+    "aiCompetitionEntry": false,
+    "aiCompetitionResult": null,
+    "aiCompetitionGroupId": null,
+    "aiCompetitionGroupName": null,
+    "aiCompetitionMonitor": false,
+    "monitorTargets": null,
+    "scoringConfig": null
+  }
+]

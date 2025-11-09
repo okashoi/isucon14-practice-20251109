@@ -203,7 +203,7 @@ func appGetRides(w http.ResponseWriter, r *http.Request) {
 	if err := tx.SelectContext(
 		ctx,
 		&rides,
-		`SELECT * FROM rides WHERE user_id = ? AND latest_status = 'COMPLETED' ORDER BY created_at DESC`,
+		`SELECT *, latest_status FROM rides WHERE user_id = ? AND latest_status = 'COMPLETED' ORDER BY created_at DESC`,
 		user.ID,
 	); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -309,7 +309,7 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback()
 
 	continuingRideCount := 0
-	if err := tx.GetContext(ctx, &continuingRideCount, `SELECT COUNT(*) FROM rides WHERE user_id = ? AND latest_status != 'COMPLETED'`, user.ID); err != nil {
+	if err := tx.GetContext(ctx, &continuingRideCount, `SELECT COUNT(*) FROM rides WHERE user_id = ? AND (latest_status IS NULL OR latest_status != 'COMPLETED')`, user.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
