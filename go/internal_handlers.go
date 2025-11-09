@@ -240,24 +240,24 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		userID  string
 	}{}
 
-	for i := 0; i < numRides; i++ {
-		rideNode := 1 + i
-		for _, edge := range mcf.graph[rideNode] {
-			// 椅子ノードへの辺で、容量が0（=流れた）ものを探す
-			if edge.to > numRides && edge.to <= numRides+numChairs && edge.capacity == 0 {
-				chairIdx := edge.to - 1 - numRides
-				// 元の容量が1で、現在0なら流れている
-				// reverse edgeの容量が1になっているはず
-				revEdge := mcf.graph[edge.to][edge.rev]
-				if revEdge.capacity == 1 {
+	// 各椅子ノードを確認して、どのrideから流れてきたかを調べる
+	for j := 0; j < numChairs; j++ {
+		chairNode := 1 + numRides + j
+		// この椅子ノードへの逆向きのエッジ（rideから椅子へ）で容量が増えているものを探す
+		for _, edge := range mcf.graph[chairNode] {
+			// rideノードへの逆向きのエッジ（元はride->chairだったもの）
+			if edge.to >= 1 && edge.to <= numRides && edge.capacity > 0 {
+				// このedgeは逆向きなので、容量が1なら元の方向に1流れた
+				if edge.capacity == 1 {
+					rideIdx := edge.to - 1
 					matchings = append(matchings, struct {
 						rideID  string
 						chairID string
 						userID  string
 					}{
-						rideID:  rides[i].ID,
-						chairID: chairs[chairIdx].ID,
-						userID:  rides[i].UserID,
+						rideID:  rides[rideIdx].ID,
+						chairID: chairs[j].ID,
+						userID:  rides[rideIdx].UserID,
 					})
 					break
 				}
