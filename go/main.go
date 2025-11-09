@@ -10,7 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
-
+    "github.com/kaz/pprotein/integration"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-sql-driver/mysql"
@@ -109,6 +109,9 @@ func setup() http.Handler {
 		mux.HandleFunc("GET /api/internal/matching", internalGetMatching)
 	}
 
+	pproteinHandler := integration.NewDebugHandler()
+	go http.ListenAndServe(":3000", pproteinHandler)
+
 	return mux
 }
 
@@ -137,6 +140,11 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	go func() {
+		if _, err := http.Get("http://54.238.146.225:9000/api/group/collect"); err != nil {
+			//log.Printf("failed to communicate with pprotein: %v", err)
+		}
+	}()
 
 	writeJSON(w, http.StatusOK, postInitializeResponse{Language: "go"})
 }
