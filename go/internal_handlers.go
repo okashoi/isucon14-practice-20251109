@@ -130,13 +130,19 @@ func calculateDistanceSquared(lat1, lon1, lat2, lon2 int) int {
 	return dLat*dLat + dLon*dLon
 }
 
+// ChairWithSpeed represents a chair with its speed information
+type ChairWithSpeed struct {
+	Chair
+	Speed int
+}
+
 // このAPIをインスタンス内から一定間隔で叩かせることで、椅子とライドをマッチングさせる
 func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-
+	
 	// 全ての未マッチングリクエストを取得
 	rides := []Ride{}
-	if err := db.SelectContext(ctx, &rides,
+	if err := db.SelectContext(ctx, &rides, 
 		`SELECT * FROM rides WHERE chair_id IS NULL ORDER BY created_at`); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			w.WriteHeader(http.StatusNoContent)
@@ -151,11 +157,12 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 全ての利用可能な椅子を取得
-	chairs := []Chair{}
+	// 全ての利用可能な椅子をスピード情報付きで取得
+	chairs := []ChairWithSpeed{}
 	query := `
-		SELECT c.*
+		SELECT c.*, cm.speed
 		FROM chairs c
+		INNER JOIN chair_models cm ON c.model = cm.name
 		WHERE c.is_active = TRUE
 		AND c.latest_latitude IS NOT NULL
 		AND c.latest_longitude IS NOT NULL
@@ -187,45 +194,48 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 最小費用流グラフを構築
-	// ノード番号: 0=source, 1~len(rides)=rides, len(rides)+1~len(rides)+len(chairs)=chairs, last=sink
-	numRides := len(rides)
+	// 参考: https://github.com/ponyo877/isucon14/blob/fa9dbe439b1af705b175b166891d46a801e34719/go/internal_handlers.go#L129
+	// ノード番号: 0=source, 1~len(chairs)=chairs, len(chairs)+1~len(chairs)+len(rides)=rides, last=sink
 	numChairs := len(chairs)
+	numRides := len(rides)
 	source := 0
-	sink := 1 + numRides + numChairs
-
+	sink := 1 + numChairs + numRides
+	
 	mcf := NewMinCostFlow(sink + 1)
 
-	// source -> rides (容量1, コスト0)
-	for i := 0; i < numRides; i++ {
-		rideNode := 1 + i
-		mcf.AddEdge(source, rideNode, 1, 0)
+	// source -> chairs (容量1, コスト0)
+	for i := 0; i < numChairs; i++ {
+		chairNode := 1 + i
+		mcf.AddEdge(source, chairNode, 1, 0)
 	}
 
-	// rides -> chairs (容量1, コスト=平方距離)
-	for i, ride := range rides {
-		rideNode := 1 + i
-		for j, chair := range chairs {
-			chairNode := 1 + numRides + j
-			dist := calculateDistanceSquared(
-				ride.PickupLatitude, ride.PickupLongitude,
+	// chairs -> rides (容量1, コスト=到達時間 distance/speed)
+	for i, chair := range chairs {
+		chairNode := 1 + i
+		for j, ride := range rides {
+			rideNode := 1 + numChairs + j
+			distance := calculateDistance(
 				*chair.LatestLatitude, *chair.LatestLongitude,
+				ride.PickupLatitude, ride.PickupLongitude,
 			)
-			mcf.AddEdge(rideNode, chairNode, 1, dist)
+			// コストは到達時間 (distance / speed)
+			cost := distance / chair.Speed
+			mcf.AddEdge(chairNode, rideNode, 1, cost)
 		}
 	}
 
-	// chairs -> sink (容量1, コスト0)
-	for j := 0; j < numChairs; j++ {
-		chairNode := 1 + numRides + j
-		mcf.AddEdge(chairNode, sink, 1, 0)
+	// rides -> sink (容量1, コスト0)
+	for j := 0; j < numRides; j++ {
+		rideNode := 1 + numChairs + j
+		mcf.AddEdge(rideNode, sink, 1, 0)
 	}
 
 	// 最小費用流を計算
-	maxPossibleFlow := numRides
-	if numChairs < maxPossibleFlow {
-		maxPossibleFlow = numChairs
+	maxPossibleFlow := numChairs
+	if numRides < maxPossibleFlow {
+		maxPossibleFlow = numRides
 	}
-
+	
 	flow, _ := mcf.Flow(source, sink, maxPossibleFlow)
 
 	if flow == 0 {
@@ -240,23 +250,23 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		userID  string
 	}{}
 
-	// 各椅子ノードを確認して、どのrideから流れてきたかを調べる
-	for j := 0; j < numChairs; j++ {
-		chairNode := 1 + numRides + j
-		// この椅子ノードへの逆向きのエッジ（rideから椅子へ）で容量が増えているものを探す
+	// 各chairノードからrideノードへの辺を確認
+	for i := 0; i < numChairs; i++ {
+		chairNode := 1 + i
 		for _, edge := range mcf.graph[chairNode] {
-			// rideノードへの逆向きのエッジ（元はride->chairだったもの）
-			if edge.to >= 1 && edge.to <= numRides && edge.capacity > 0 {
-				// このedgeは逆向きなので、容量が1なら元の方向に1流れた
-				if edge.capacity == 1 {
-					rideIdx := edge.to - 1
+			// rideノードへの辺で、容量が0（=流れた）ものを探す
+			if edge.to > numChairs && edge.to <= numChairs+numRides && edge.capacity == 0 {
+				rideIdx := edge.to - 1 - numChairs
+				// 逆向きエッジの容量が1なら確実に流れている
+				revEdge := mcf.graph[edge.to][edge.rev]
+				if revEdge.capacity == 1 {
 					matchings = append(matchings, struct {
 						rideID  string
 						chairID string
 						userID  string
 					}{
 						rideID:  rides[rideIdx].ID,
-						chairID: chairs[j].ID,
+						chairID: chairs[i].ID,
 						userID:  rides[rideIdx].UserID,
 					})
 					break
