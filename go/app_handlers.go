@@ -866,7 +866,7 @@ func appGetNearbyChairs(w http.ResponseWriter, r *http.Request) {
 
 		// 過去にライドが存在し、かつ、それが完了していない場合はスキップ
 		incompleteRideCount := 0
-		if err := tx.GetContext(ctx, &incompleteRideCount, `SELECT COUNT(*) FROM rides WHERE chair_id = ? AND latest_status != 'COMPLETED'`, chair.ID); err != nil {
+		if err := tx.GetContext(ctx, &incompleteRideCount, `SELECT COUNT(*) FROM rides WHERE chair_id = ? AND (latest_status IS NULL OR latest_status != 'COMPLETED')`, chair.ID); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
