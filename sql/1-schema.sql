@@ -35,6 +35,8 @@ CREATE TABLE chairs
   latest_latitude INTEGER NULL INVISIBLE COMMENT '最新の経度',
   latest_longitude INTEGER NULL INVISIBLE COMMENT '最新の緯度',
   latest_location_updated_at DATETIME(6) NULL INVISIBLE COMMENT '最新位置の更新日時',
+  total_distance INTEGER NOT NULL DEFAULT 0 INVISIBLE COMMENT '総移動距離',
+  total_distance_updated_at DATETIME(6) NULL INVISIBLE COMMENT '総移動距離の更新日時',
   PRIMARY KEY (id)
 )
   COMMENT = '椅子情報テーブル';
