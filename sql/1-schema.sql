@@ -32,6 +32,9 @@ CREATE TABLE chairs
   access_token VARCHAR(255) NOT NULL COMMENT 'アクセストークン',
   created_at   DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT '登録日時',
   updated_at   DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT '更新日時',
+  latest_latitude INTEGER NULL INVISIBLE COMMENT '最新の経度',
+  latest_longitude INTEGER NULL INVISIBLE COMMENT '最新の緯度',
+  latest_location_updated_at DATETIME(6) NULL INVISIBLE COMMENT '最新位置の更新日時',
   PRIMARY KEY (id)
 )
   COMMENT = '椅子情報テーブル';
