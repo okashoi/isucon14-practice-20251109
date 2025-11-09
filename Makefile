@@ -6,6 +6,7 @@ gogo: stop-services build logs/clear start-services start-bench
 stop-services:
 	sudo systemctl stop nginx
 	sudo systemctl stop $(APPNAME)
+	sudo systemctl stop isuride-matcher.service 
 	ssh isucon-s2 "sudo systemctl stop mysql"
 
 build:
@@ -30,6 +31,7 @@ start-services:
 	sudo systemctl daemon-reload
 	ssh isucon-s2 "sudo systemctl start mysql"
 	sudo systemctl start $(APPNAME)
+	sudo systemctl start isuride-matcher.service 
 	sudo systemctl start nginx
 
 kataribe: timestamp=$(shell TZ=Asia/Tokyo date "+%Y%m%d-%H%M%S")
