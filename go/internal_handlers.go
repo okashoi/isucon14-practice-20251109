@@ -19,53 +19,62 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// pickup座標に近い椅子を最大10件取得
-	nearbyChairs := []Chair{}
+	// pickup座標に近い空いている椅子を取得してアサイン
+	matched := &Chair{}
 	query := `
-		SELECT c.*
-		FROM chairs c
-		INNER JOIN (
+		WITH available_chairs AS (
+			-- 空いている椅子（is_activeでかつ未完了のrideがない）
+			SELECT c.id 
+			FROM chairs c
+			WHERE c.is_active = TRUE
+			AND NOT EXISTS (
+				SELECT 1
+				FROM rides r
+				WHERE r.chair_id = c.id
+				AND EXISTS (
+					SELECT 1
+					FROM ride_statuses rs
+					WHERE rs.ride_id = r.id
+					GROUP BY rs.ride_id
+					HAVING COUNT(rs.chair_sent_at) < 6
+				)
+			)
+		),
+		latest_locations AS (
+			-- 各椅子の最新位置
 			SELECT 
 				chair_id,
 				latitude,
 				longitude,
 				ROW_NUMBER() OVER (PARTITION BY chair_id ORDER BY created_at DESC) AS rn
 			FROM chair_locations
-			WHERE chair_id IN (
-				SELECT id FROM chairs WHERE is_active = TRUE
-			)
-		) cl ON c.id = cl.chair_id AND cl.rn = 1
+			WHERE chair_id IN (SELECT id FROM available_chairs)
+		)
+		SELECT c.*
+		FROM chairs c
+		INNER JOIN latest_locations cl ON c.id = cl.chair_id AND cl.rn = 1
 		ORDER BY 
 			(cl.latitude - ?) * (cl.latitude - ?) + 
 			(cl.longitude - ?) * (cl.longitude - ?)
-		LIMIT 10
+		LIMIT 1
 	`
-	if err := db.SelectContext(ctx, &nearbyChairs, query,
+	if err := db.GetContext(ctx, matched, query,
 		ride.PickupLatitude, ride.PickupLatitude,
 		ride.PickupLongitude, ride.PickupLongitude,
 	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
-	// 近い順に椅子が空いているかチェックしてアサイン
-	for _, chair := range nearbyChairs {
-		empty := false
-		if err := db.GetContext(ctx, &empty, "SELECT COUNT(*) = 0 FROM (SELECT COUNT(chair_sent_at) = 6 AS completed FROM ride_statuses WHERE ride_id IN (SELECT id FROM rides WHERE chair_id = ?) GROUP BY ride_id) is_completed WHERE completed = FALSE", chair.ID); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		if empty {
-			// 空いている椅子が見つかったのでアサイン
-			if _, err := db.ExecContext(ctx, "UPDATE rides SET chair_id = ? WHERE id = ?", chair.ID, ride.ID); err != nil {
-				writeError(w, http.StatusInternalServerError, err)
-				return
-			}
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
+	// 空いている椅子が見つかったのでアサイン
+	if _, err := db.ExecContext(ctx, "UPDATE rides SET chair_id = ? WHERE id = ?", matched.ID, ride.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
 	}
 
-	// 空いている椅子が見つからなかった
 	w.WriteHeader(http.StatusNoContent)
 }
