@@ -276,11 +276,14 @@ type executableGet interface {
 }
 
 func getLatestRideStatus(ctx context.Context, tx executableGet, rideID string) (string, error) {
-	status := ""
-	if err := tx.GetContext(ctx, &status, `SELECT status FROM ride_statuses WHERE ride_id = ? ORDER BY created_at DESC LIMIT 1`, rideID); err != nil {
+	var status sql.NullString
+	if err := tx.GetContext(ctx, &status, `SELECT latest_status FROM rides WHERE id = ?`, rideID); err != nil {
 		return "", err
 	}
-	return status, nil
+	if status.Valid {
+		return status.String, nil
+	}
+	return "", nil
 }
 
 func appPostRides(w http.ResponseWriter, r *http.Request) {
