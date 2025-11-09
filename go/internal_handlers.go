@@ -37,7 +37,7 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		ORDER BY 
 			(cl.latitude - ?) * (cl.latitude - ?) + 
 			(cl.longitude - ?) * (cl.longitude - ?)
-		LIMIT 5
+		LIMIT 10
 	`
 	if err := db.SelectContext(ctx, &nearbyChairs, query,
 		ride.PickupLatitude, ride.PickupLatitude,
@@ -55,6 +55,7 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if empty {
+			// 空いている椅子が見つかったのでアサイン
 			if _, err := db.ExecContext(ctx, "UPDATE rides SET chair_id = ? WHERE id = ?", chair.ID, ride.ID); err != nil {
 				writeError(w, http.StatusInternalServerError, err)
 				return
