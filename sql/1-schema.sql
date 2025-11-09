@@ -93,10 +93,14 @@ CREATE TABLE rides
   evaluation            INTEGER     NULL     COMMENT '評価',
   created_at            DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT '要求日時',
   updated_at            DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT '状態更新日時',
+  latest_status         ENUM ('MATCHING', 'ENROUTE', 'PICKUP', 'CARRYING', 'ARRIVED', 'COMPLETED') NULL INVISIBLE COMMENT '最新状態',
   PRIMARY KEY (id)
 )
   COMMENT = 'ライド情報テーブル';
 ALTER TABLE rides ADD INDEX (chair_id, updated_at DESC);
+
+ALTER TABLE rides ADD INDEX (user_id, latest_status);
+ALTER TABLE rides ADD INDEX (chair_id, latest_status);
 ALTER TABLE rides ADD INDEX idx_user_id_created_at (user_id, created_at DESC);
 
 DROP TABLE IF EXISTS ride_statuses;
@@ -140,5 +144,20 @@ CREATE TABLE coupons
   PRIMARY KEY (user_id, code)
 )
   COMMENT 'クーポンテーブル';
+
+DROP TRIGGER IF EXISTS trg_ride_statuses_after_insert;
+DELIMITER //
+CREATE TRIGGER trg_ride_statuses_after_insert
+AFTER INSERT ON ride_statuses
+FOR EACH ROW
+BEGIN
+  UPDATE rides
+    SET latest_status = NEW.status,
+        updated_at    = NEW.created_at
+  WHERE id = NEW.ride_id;
+END//
+DELIMITER ;
+
+
 ALTER TABLE coupons ADD INDEX idx_used_by (used_by);
 
