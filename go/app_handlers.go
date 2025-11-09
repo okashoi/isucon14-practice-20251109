@@ -417,6 +417,13 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// マッチングキューにrideIDを投入
+	select {
+	case matchingQueue <- rideID:
+	default:
+		// キューが満杯の場合はスキップ（後でデーモンが拾う）
+	}
+
 	writeJSON(w, http.StatusAccepted, &appPostRidesResponse{
 		RideID: rideID,
 		Fare:   fare,
