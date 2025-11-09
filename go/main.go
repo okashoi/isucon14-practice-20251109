@@ -65,6 +65,8 @@ func setup() http.Handler {
 		panic(err)
 	}
 	db = _db
+	db.SetMaxOpenConns(50)
+	db.SetMaxIdleConns(50)
 
 	mux := chi.NewRouter()
 	mux.Use(middleware.Logger)
