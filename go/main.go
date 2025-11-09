@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
+	"time"
     "github.com/kaz/pprotein/integration"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -25,6 +26,12 @@ var (
 	appNotificationChannels   = make(map[string]chan struct{})
 	chairNotificationChannels = make(map[string]chan struct{})
 	notificationMutex         sync.RWMutex
+)
+
+// chair_locations のバッファリング用
+var (
+	chairLocationBuffer      = []ChairLocation{}
+	chairLocationBufferMutex sync.Mutex
 )
 
 func main() {
@@ -123,6 +130,9 @@ func setup() http.Handler {
 	pproteinHandler := integration.NewDebugHandler()
 	go http.ListenAndServe(":3000", pproteinHandler)
 
+	// chair_locations のバルクインサート用goroutineを起動
+	go bulkInsertChairLocations()
+
 	return mux
 }
 
@@ -157,6 +167,11 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	appNotificationChannels = make(map[string]chan struct{})
 	chairNotificationChannels = make(map[string]chan struct{})
 	notificationMutex.Unlock()
+
+	// chair_locationsバッファをクリア
+	chairLocationBufferMutex.Lock()
+	chairLocationBuffer = []ChairLocation{}
+	chairLocationBufferMutex.Unlock()
 
 	go func() {
 		if _, err := http.Get("http://54.238.146.225:9000/api/group/collect"); err != nil {
@@ -207,4 +222,42 @@ func secureRandomStr(b int) string {
 		panic(err)
 	}
 	return fmt.Sprintf("%x", k)
+}
+
+// chair_locations のバルクインサート処理
+func bulkInsertChairLocations() {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		chairLocationBufferMutex.Lock()
+		if len(chairLocationBuffer) == 0 {
+			chairLocationBufferMutex.Unlock()
+			continue
+		}
+
+		// バッファをコピーして即座にクリア
+		locations := make([]ChairLocation, len(chairLocationBuffer))
+		copy(locations, chairLocationBuffer)
+		chairLocationBuffer = chairLocationBuffer[:0]
+		chairLocationBufferMutex.Unlock()
+
+		// バルクインサート実行
+		if len(locations) > 0 {
+			insertChairLocationsBulk(locations)
+		}
+	}
+}
+
+func insertChairLocationsBulk(locations []ChairLocation) {
+	if len(locations) == 0 {
+		return
+	}
+
+	// sqlx.NamedExecを使ってバルクインサート
+	query := `INSERT INTO chair_locations (id, chair_id, latitude, longitude, created_at) VALUES (:id, :chair_id, :latitude, :longitude, :created_at)`
+	_, err := db.NamedExec(query, locations)
+	if err != nil {
+		slog.Error("bulk insert chair_locations failed", "error", err, "count", len(locations))
+	}
 }
