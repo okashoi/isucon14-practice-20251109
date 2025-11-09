@@ -120,6 +120,7 @@ CREATE TABLE ride_statuses
 )
   COMMENT = 'ライドステータスの変更履歴テーブル';
 ALTER TABLE ride_statuses ADD INDEX (ride_id, created_at DESC, status);
+ALTER TABLE ride_statuses ADD INDEX (ride_id, chair_sent_at);
 
 DROP TABLE IF EXISTS owners;
 CREATE TABLE owners
