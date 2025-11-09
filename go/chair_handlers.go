@@ -121,23 +121,13 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	chairLocationBuffer = append(chairLocationBuffer, location)
 	chairLocationBufferMutex.Unlock()
 
-	// chairs テーブルの最新位置を即座に更新（付近の椅子検索のため）
+	// ride_statusesの更新のみトランザクション処理
 	tx, err := db.Beginx()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	defer tx.Rollback()
-
-	// latest_latitude, latest_longitude, latest_location_updated_at を更新
-	if _, err := tx.ExecContext(
-		ctx,
-		`UPDATE chairs SET latest_latitude = ?, latest_longitude = ?, latest_location_updated_at = ? WHERE id = ?`,
-		req.Latitude, req.Longitude, now, chair.ID,
-	); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
 
 	ride := &Ride{}
 	if err := tx.GetContext(ctx, ride, `SELECT *, latest_status FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {

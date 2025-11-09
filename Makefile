@@ -31,7 +31,7 @@ start-services:
 	sudo systemctl daemon-reload
 	ssh isucon-s2 "sudo systemctl start mysql"
 	sudo systemctl start $(APPNAME)
-	# sudo systemctl start isuride-matcher.service
+	sudo systemctl start isuride-matcher.service 
 	sudo systemctl start nginx
 
 kataribe: timestamp=$(shell TZ=Asia/Tokyo date "+%Y%m%d-%H%M%S")

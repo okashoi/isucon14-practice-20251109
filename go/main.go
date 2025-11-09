@@ -1,11 +1,8 @@
 package main
 
 import (
-	"context"
 	crand "crypto/rand"
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -35,11 +32,6 @@ var (
 var (
 	chairLocationBuffer      = []ChairLocation{}
 	chairLocationBufferMutex sync.Mutex
-)
-
-// マッチングキュー
-var (
-	matchingQueue = make(chan string, 1000) // ride IDのキュー
 )
 
 func main() {
@@ -141,9 +133,6 @@ func setup() http.Handler {
 	// chair_locations のバルクインサート用goroutineを起動
 	go bulkInsertChairLocations()
 
-	// マッチングワーカーgoroutineを起動
-	go matchingWorker()
-
 	return mux
 }
 
@@ -183,18 +172,6 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	chairLocationBufferMutex.Lock()
 	chairLocationBuffer = []ChairLocation{}
 	chairLocationBufferMutex.Unlock()
-
-	// マッチングキューをクリア（既存のキューを消費）
-	for {
-		select {
-		case <-matchingQueue:
-			// キューから全て取り出す
-		default:
-			// キューが空になったら終了
-			goto QUEUE_CLEARED
-		}
-	}
-QUEUE_CLEARED:
 
 	go func() {
 		if _, err := http.Get("http://54.238.146.225:9000/api/group/collect"); err != nil {
@@ -283,93 +260,4 @@ func insertChairLocationsBulk(locations []ChairLocation) {
 	if err != nil {
 		slog.Error("bulk insert chair_locations failed", "error", err, "count", len(locations))
 	}
-}
-
-// マッチングワーカー
-func matchingWorker() {
-	for rideID := range matchingQueue {
-		tryMatchRide(rideID)
-		// 過負荷防止のため少し待機
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// 1つのrideに対してマッチング処理を試行
-func tryMatchRide(rideID string) {
-	ctx := context.Background()
-
-	// rideの情報を取得
-	ride := &Ride{}
-	if err := db.GetContext(ctx, ride, `SELECT * FROM rides WHERE id = ? AND chair_id IS NULL`, rideID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			// 既にマッチング済み、またはキャンセル済み
-			return
-		}
-		slog.Error("failed to get ride", "error", err, "ride_id", rideID)
-		return
-	}
-
-	// pickup座標に近い空いている椅子を取得してアサイン
-	matched := &Chair{}
-	query := `
-		SELECT c.*
-		FROM chairs c
-		WHERE c.is_active = TRUE
-		AND c.latest_latitude IS NOT NULL
-		AND c.latest_longitude IS NOT NULL
-		AND NOT EXISTS (
-			SELECT 1
-			FROM rides r
-			WHERE r.chair_id = c.id
-			AND EXISTS (
-				SELECT 1
-				FROM ride_statuses rs
-				WHERE rs.ride_id = r.id
-				GROUP BY rs.ride_id
-				HAVING COUNT(rs.chair_sent_at) < 6
-			)
-		)
-		ORDER BY
-			(c.latest_latitude - ?) * (c.latest_latitude - ?) +
-			(c.latest_longitude - ?) * (c.latest_longitude - ?)
-		LIMIT 1
-	`
-	if err := db.GetContext(ctx, matched, query,
-		ride.PickupLatitude, ride.PickupLatitude,
-		ride.PickupLongitude, ride.PickupLongitude,
-	); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			// 空いている椅子が見つからない場合は、キューに再投入
-			select {
-			case matchingQueue <- rideID:
-			default:
-				// キューが満杯の場合はスキップ
-			}
-			return
-		}
-		slog.Error("failed to find available chair", "error", err, "ride_id", rideID)
-		return
-	}
-
-	// 空いている椅子が見つかったのでアサイン
-	if _, err := db.ExecContext(ctx, "UPDATE rides SET chair_id = ? WHERE id = ? AND chair_id IS NULL", matched.ID, ride.ID); err != nil {
-		slog.Error("failed to assign chair to ride", "error", err, "ride_id", rideID, "chair_id", matched.ID)
-		return
-	}
-
-	// マッチング成立を即座に通知
-	notificationMutex.RLock()
-	if ch, ok := appNotificationChannels[ride.UserID]; ok {
-		select {
-		case ch <- struct{}{}:
-		default: // ブロッキング回避
-		}
-	}
-	if ch, ok := chairNotificationChannels[matched.ID]; ok {
-		select {
-		case ch <- struct{}{}:
-		default: // ブロッキング回避
-		}
-	}
-	notificationMutex.RUnlock()
 }
