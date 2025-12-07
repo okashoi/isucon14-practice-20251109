@@ -3,7 +3,6 @@ package main
 import (
 	"math"
 	"net/http"
-	"time"
 )
 
 // 最小費用流アルゴリズム用のエッジ構造体
@@ -136,10 +135,10 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. 利用可能な椅子を距離順で取得（上位10件に制限して処理を高速化）
+	// 2. 最も近い椅子を1件取得
 	// current_ride_id IS NULL で空き椅子を判定
-	ride := rides[0] // 1件のみ取得しているので最初のライドを使用
-	chairs := []Chair{}
+	ride := rides[0]
+	matched := &Chair{}
 	chairQuery := `
 		SELECT c.*, c.latest_latitude, c.latest_longitude
 		FROM chairs c
@@ -150,126 +149,38 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		ORDER BY 
 			(c.latest_latitude - ?) * (c.latest_latitude - ?) + 
 			(c.latest_longitude - ?) * (c.latest_longitude - ?)
-		LIMIT 10
+		LIMIT 1
 	`
-	if err := db.SelectContext(ctx, &chairs, chairQuery,
+	if err := db.GetContext(ctx, matched, chairQuery,
 		ride.PickupLatitude, ride.PickupLatitude,
 		ride.PickupLongitude, ride.PickupLongitude,
 	); err != nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// 3. マッチング結果をDBに反映
+	if _, err := db.ExecContext(ctx, "UPDATE rides SET chair_id = ? WHERE id = ?", matched.ID, ride.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if len(chairs) == 0 {
-		w.WriteHeader(http.StatusNoContent)
+	if _, err := db.ExecContext(ctx, "UPDATE chairs SET current_ride_id = ? WHERE id = ?", ride.ID, matched.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
-	// 3. 最小費用流グラフを構築
-	// ノード: source(0), rides(1..n), chairs(n+1..n+m), sink(n+m+1)
-	n := len(rides)
-	m := len(chairs)
-	source := 0
-	sink := n + m + 1
-	mcf := NewMinCostFlow(n + m + 2)
-
-	// source → rides (容量1, コスト0)
-	for i := 0; i < n; i++ {
-		rideNode := i + 1
-		mcf.AddEdge(source, rideNode, 1, 0)
-	}
-
-	// rides → chairs (容量1, コスト=平方距離を待ち時間で調整)
-	now := time.Now()
-	for i, ride := range rides {
-		rideNode := i + 1
-		// 待ち時間（秒）を計算
-		waitSeconds := now.Sub(ride.CreatedAt).Seconds()
-		// 待ち時間が長いほどコストを下げる係数（30秒で1/4に）
-		waitFactor := 1.0 / (1.0 + waitSeconds/10.0)
-
-		for j, chair := range chairs {
-			chairNode := n + 1 + j
-			// 平方距離をコストとして使用
-			latDiff := int64(*chair.LatestLatitude - ride.PickupLatitude)
-			lonDiff := int64(*chair.LatestLongitude - ride.PickupLongitude)
-			distCost := latDiff*latDiff + lonDiff*lonDiff
-			// 待ち時間で調整したコスト
-			cost := int64(float64(distCost) * waitFactor)
-			mcf.AddEdge(rideNode, chairNode, 1, cost)
-		}
-	}
-
-	// chairs → sink (容量1, コスト0)
-	for j := 0; j < m; j++ {
-		chairNode := n + 1 + j
-		mcf.AddEdge(chairNode, sink, 1, 0)
-	}
-
-	// 4. 最小費用流を計算（最大フロー = min(n, m)）
-	maxFlow := n
-	if m < n {
-		maxFlow = m
-	}
-	mcf.Run(source, sink, maxFlow)
-
-	// 5. マッチング結果を抽出
-	// フローが流れたエッジからマッチングを特定
-	type Match struct {
-		rideIdx  int
-		chairIdx int
-	}
-	matches := []Match{}
-
-	for i := 0; i < n; i++ {
-		rideNode := i + 1
-		for _, e := range mcf.graph[rideNode] {
-			// 椅子ノードへのエッジで、容量が0になっている（フローが流れた）ものを探す
-			if e.to > n && e.to <= n+m && e.cap == 0 {
-				chairIdx := e.to - n - 1
-				matches = append(matches, Match{rideIdx: i, chairIdx: chairIdx})
-				break
-			}
-		}
-	}
-
-	if len(matches) == 0 {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	// 6. マッチング結果をDBに反映
-	for _, match := range matches {
-		ride := rides[match.rideIdx]
-		chair := chairs[match.chairIdx]
-		if _, err := db.ExecContext(ctx, "UPDATE rides SET chair_id = ? WHERE id = ?", chair.ID, ride.ID); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		if _, err := db.ExecContext(ctx, "UPDATE chairs SET current_ride_id = ? WHERE id = ?", ride.ID, chair.ID); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-	}
-
-	// 7. マッチング成立を通知
+	// 4. マッチング成立を通知
 	notificationMutex.RLock()
-	for _, match := range matches {
-		ride := rides[match.rideIdx]
-		chair := chairs[match.chairIdx]
-
-		// ユーザーへの通知
-		if ch, ok := appNotificationChannels[ride.UserID]; ok {
-			select {
-			case ch <- struct{}{}:
-			default: // ブロッキング回避
-			}
+	if ch, ok := appNotificationChannels[ride.UserID]; ok {
+		select {
+		case ch <- struct{}{}:
+		default: // ブロッキング回避
 		}
-		// 椅子への通知
-		if ch, ok := chairNotificationChannels[chair.ID]; ok {
-			select {
-			case ch <- struct{}{}:
-			default: // ブロッキング回避
-			}
+	}
+	if ch, ok := chairNotificationChannels[matched.ID]; ok {
+		select {
+		case ch <- struct{}{}:
+		default: // ブロッキング回避
 		}
 	}
 	notificationMutex.RUnlock()
