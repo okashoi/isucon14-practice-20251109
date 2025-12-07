@@ -36,6 +36,19 @@ var (
 	chairLocationBufferMutex sync.Mutex
 )
 
+// chairs更新用バッファ
+type ChairUpdateData struct {
+	LatestLatitude          int
+	LatestLongitude         int
+	LatestLocationUpdatedAt time.Time
+	DistanceToAdd           int
+}
+
+var (
+	chairUpdateBuffer      = make(map[string]*ChairUpdateData)
+	chairUpdateBufferMutex sync.Mutex
+)
+
 // 未送信ステータスのキャッシュ (ride_id -> []RideStatus)
 var (
 	appUnsentStatuses   = make(map[string][]RideStatus)
@@ -300,6 +313,9 @@ func setup() http.Handler {
 	// chair_locations のバルクインサート用goroutineを起動
 	go bulkInsertChairLocations()
 
+	// chairs テーブルのバルク更新用goroutineを起動
+	go bulkUpdateChairs()
+
 	return mux
 }
 
@@ -339,6 +355,11 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	chairLocationBufferMutex.Lock()
 	chairLocationBuffer = []ChairLocation{}
 	chairLocationBufferMutex.Unlock()
+
+	// chairs更新バッファをクリア
+	chairUpdateBufferMutex.Lock()
+	chairUpdateBuffer = make(map[string]*ChairUpdateData)
+	chairUpdateBufferMutex.Unlock()
 
 	// 未送信ステータスキャッシュをクリア
 	appUnsentMutex.Lock()
@@ -453,5 +474,93 @@ func insertChairLocationsBulk(locations []ChairLocation) {
 	_, err := db.Exec(query, valueArgs...)
 	if err != nil {
 		slog.Error("bulk insert chair_locations failed", "error", err, "count", len(locations))
+	}
+}
+
+// chairs テーブルのバルク更新処理
+func bulkUpdateChairs() {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		chairUpdateBufferMutex.Lock()
+		if len(chairUpdateBuffer) == 0 {
+			chairUpdateBufferMutex.Unlock()
+			continue
+		}
+
+		// バッファをコピーして即座にクリア
+		updates := make(map[string]*ChairUpdateData, len(chairUpdateBuffer))
+		for k, v := range chairUpdateBuffer {
+			updates[k] = v
+		}
+		chairUpdateBuffer = make(map[string]*ChairUpdateData)
+		chairUpdateBufferMutex.Unlock()
+
+		// バルクアップデート実行
+		if len(updates) > 0 {
+			updateChairsBulk(updates)
+		}
+	}
+}
+
+func updateChairsBulk(updates map[string]*ChairUpdateData) {
+	if len(updates) == 0 {
+		return
+	}
+
+	// CASE文を使ったバルクUPDATE
+	var ids []string
+	for id := range updates {
+		ids = append(ids, id)
+	}
+
+	// クエリ構築
+	var latCases, lonCases, updatedAtCases, distCases []string
+	args := make([]interface{}, 0, len(updates)*5+len(updates))
+
+	for _, id := range ids {
+		data := updates[id]
+		latCases = append(latCases, "WHEN ? THEN ?")
+		args = append(args, id, data.LatestLatitude)
+	}
+	for _, id := range ids {
+		data := updates[id]
+		lonCases = append(lonCases, "WHEN ? THEN ?")
+		args = append(args, id, data.LatestLongitude)
+	}
+	for _, id := range ids {
+		data := updates[id]
+		updatedAtCases = append(updatedAtCases, "WHEN ? THEN ?")
+		args = append(args, id, data.LatestLocationUpdatedAt)
+	}
+	for _, id := range ids {
+		data := updates[id]
+		distCases = append(distCases, "WHEN ? THEN total_distance + ?")
+		args = append(args, id, data.DistanceToAdd)
+	}
+
+	// IN句用のプレースホルダ
+	placeholders := make([]string, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+
+	query := fmt.Sprintf(`UPDATE chairs SET 
+		latest_latitude = CASE id %s END,
+		latest_longitude = CASE id %s END,
+		latest_location_updated_at = CASE id %s END,
+		total_distance = CASE id %s END
+		WHERE id IN (%s)`,
+		strings.Join(latCases, " "),
+		strings.Join(lonCases, " "),
+		strings.Join(updatedAtCases, " "),
+		strings.Join(distCases, " "),
+		strings.Join(placeholders, ","))
+
+	_, err := db.Exec(query, args...)
+	if err != nil {
+		slog.Error("bulk update chairs failed", "error", err, "count", len(updates))
 	}
 }

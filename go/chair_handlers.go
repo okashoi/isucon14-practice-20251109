@@ -137,16 +137,23 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		distance = abs(req.Latitude-prevLocation.Latitude) + abs(req.Longitude-prevLocation.Longitude)
 	}
 
-	// chairsテーブルを即座に更新（トリガーの代わり）
-	if _, err := db.ExecContext(ctx, `UPDATE chairs SET 
-		latest_latitude = ?, 
-		latest_longitude = ?, 
-		latest_location_updated_at = ?,
-		total_distance = total_distance + ?
-	WHERE id = ?`, req.Latitude, req.Longitude, now, distance, chair.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+	// chairsテーブルの更新をバッファに追加（バッチ処理で実行）
+	chairUpdateBufferMutex.Lock()
+	if existing, ok := chairUpdateBuffer[chair.ID]; ok {
+		// 既存エントリがある場合は位置を上書き、距離は累積
+		existing.LatestLatitude = req.Latitude
+		existing.LatestLongitude = req.Longitude
+		existing.LatestLocationUpdatedAt = now
+		existing.DistanceToAdd += distance
+	} else {
+		chairUpdateBuffer[chair.ID] = &ChairUpdateData{
+			LatestLatitude:          req.Latitude,
+			LatestLongitude:         req.Longitude,
+			LatestLocationUpdatedAt: now,
+			DistanceToAdd:           distance,
+		}
 	}
+	chairUpdateBufferMutex.Unlock()
 
 	// メモリキャッシュを更新
 	setChairLatestLocation(chair.ID, &location)
