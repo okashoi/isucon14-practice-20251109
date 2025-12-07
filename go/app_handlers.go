@@ -944,7 +944,7 @@ func appGetNearbyChairs(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	// chairsテーブルから椅子情報と最新位置を取得（未完了ライドがないものに絞り込み）
+	// chairsテーブルから椅子情報と最新位置を取得（空き椅子のみ）
 	chairs := []chairWithLocation{}
 	err = tx.SelectContext(
 		ctx,
@@ -956,12 +956,10 @@ func appGetNearbyChairs(w http.ResponseWriter, r *http.Request) {
 			c.latest_latitude AS latitude,
 			c.latest_longitude AS longitude
 		FROM chairs c
-		LEFT JOIN rides r ON c.id = r.chair_id AND (r.latest_status IS NULL OR r.latest_status != 'COMPLETED')
 		WHERE c.is_active = 1
 			AND c.latest_latitude IS NOT NULL
 			AND c.latest_longitude IS NOT NULL
-		GROUP BY c.id, c.name, c.model, c.latest_latitude, c.latest_longitude
-		HAVING COUNT(r.id) = 0`,
+			AND c.current_ride_id IS NULL`,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
