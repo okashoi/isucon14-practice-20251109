@@ -47,6 +47,7 @@ func chairPostChairs(w http.ResponseWriter, r *http.Request) {
 	chairID := ulid.Make().String()
 	accessToken := secureRandomStr(32)
 
+	now := time.Now()
 	_, err := db.ExecContext(
 		ctx,
 		"INSERT INTO chairs (id, owner_id, name, model, is_active, access_token) VALUES (?, ?, ?, ?, ?, ?)",
@@ -56,6 +57,18 @@ func chairPostChairs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+
+	// 新規登録したChairをキャッシュに追加
+	setChairCache(accessToken, &Chair{
+		ID:          chairID,
+		OwnerID:     owner.ID,
+		Name:        req.Name,
+		Model:       req.Model,
+		IsActive:    false,
+		AccessToken: accessToken,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	})
 
 	http.SetCookie(w, &http.Cookie{
 		Path:  "/",
@@ -117,6 +130,28 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: now,
 	}
 
+	// メモリキャッシュから前回位置を取得して距離を計算
+	prevLocation := getChairLatestLocation(chair.ID)
+	distance := 0
+	if prevLocation != nil {
+		distance = abs(req.Latitude-prevLocation.Latitude) + abs(req.Longitude-prevLocation.Longitude)
+	}
+
+	// chairsテーブルを即座に更新（トリガーの代わり）
+	if _, err := db.ExecContext(ctx, `UPDATE chairs SET 
+		latest_latitude = ?, 
+		latest_longitude = ?, 
+		latest_location_updated_at = ?,
+		total_distance = total_distance + ?
+	WHERE id = ?`, req.Latitude, req.Longitude, now, distance, chair.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	// メモリキャッシュを更新
+	setChairLatestLocation(chair.ID, &location)
+
+	// chair_locationsバッファに追加
 	chairLocationBufferMutex.Lock()
 	chairLocationBuffer = append(chairLocationBuffer, location)
 	chairLocationBufferMutex.Unlock()
@@ -135,34 +170,47 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	var insertedRideID string
 	insertedStatusCreatedAt := time.Now()
 
-	if err := tx.GetContext(ctx, ride, `SELECT *, latest_status FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusInternalServerError, err)
-			return
+	// キャッシュからcurrent_ride_idを取得
+	currentRideID, cacheHit := getChairCurrentRideID(chair.ID)
+	if !cacheHit {
+		// キャッシュミス時はDBから取得してキャッシュを更新
+		if chair.CurrentRideID.Valid {
+			currentRideID = chair.CurrentRideID.String
 		}
-	} else {
-		status := ""
-		if ride.LatestStatus.Valid {
-			status = ride.LatestStatus.String
-		}
-		if status != "COMPLETED" && status != "CANCELED" {
-			if req.Latitude == ride.PickupLatitude && req.Longitude == ride.PickupLongitude && status == "ENROUTE" {
-				insertedStatusID = ulid.Make().String()
-				insertedStatusName = "PICKUP"
-				insertedRideID = ride.ID
-				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", insertedStatusID, ride.ID, "PICKUP"); err != nil {
-					writeError(w, http.StatusInternalServerError, err)
-					return
-				}
-			}
+		setChairCurrentRideID(chair.ID, currentRideID)
+	}
 
-			if req.Latitude == ride.DestinationLatitude && req.Longitude == ride.DestinationLongitude && status == "CARRYING" {
-				insertedStatusID = ulid.Make().String()
-				insertedStatusName = "ARRIVED"
-				insertedRideID = ride.ID
-				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", insertedStatusID, ride.ID, "ARRIVED"); err != nil {
-					writeError(w, http.StatusInternalServerError, err)
-					return
+	// current_ride_idがある場合のみrideを取得
+	if currentRideID != "" {
+		if err := tx.GetContext(ctx, ride, `SELECT *, latest_status FROM rides WHERE id = ?`, currentRideID); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+		} else {
+			status := ""
+			if ride.LatestStatus.Valid {
+				status = ride.LatestStatus.String
+			}
+			if status != "COMPLETED" && status != "CANCELED" {
+				if req.Latitude == ride.PickupLatitude && req.Longitude == ride.PickupLongitude && status == "ENROUTE" {
+					insertedStatusID = ulid.Make().String()
+					insertedStatusName = "PICKUP"
+					insertedRideID = ride.ID
+					if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", insertedStatusID, ride.ID, "PICKUP"); err != nil {
+						writeError(w, http.StatusInternalServerError, err)
+						return
+					}
+				}
+
+				if req.Latitude == ride.DestinationLatitude && req.Longitude == ride.DestinationLongitude && status == "CARRYING" {
+					insertedStatusID = ulid.Make().String()
+					insertedStatusName = "ARRIVED"
+					insertedRideID = ride.ID
+					if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", insertedStatusID, ride.ID, "ARRIVED"); err != nil {
+						writeError(w, http.StatusInternalServerError, err)
+						return
+					}
 				}
 			}
 		}
@@ -237,26 +285,40 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 
 	// 未送信の状態遷移を全て送信する関数
 	sendNotifications := func() {
+		// キャッシュからcurrent_ride_idを取得
+		currentRideID, cacheHit := getChairCurrentRideID(chair.ID)
+		if !cacheHit {
+			// キャッシュミス時はDBから取得してキャッシュを更新
+			if chair.CurrentRideID.Valid {
+				currentRideID = chair.CurrentRideID.String
+			}
+			setChairCurrentRideID(chair.ID, currentRideID)
+		}
+
+		// current_ride_idがない場合はスキップ
+		if currentRideID == "" {
+			return
+		}
+
+		// 未送信の状態をキャッシュから取得
+		yetSentRideStatuses := getChairUnsentStatuses(currentRideID)
+
+		// 未送信の状態がない場合はスキップ（DBアクセス前に判定）
+		if len(yetSentRideStatuses) == 0 {
+			return
+		}
+
 		tx, err := db.Beginx()
 		if err != nil {
 			return
 		}
 
 		ride := &Ride{}
-		if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
+		if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE id = ?`, currentRideID); err != nil {
 			tx.Rollback()
 			if errors.Is(err, sql.ErrNoRows) {
 				return
 			}
-			return
-		}
-
-		// 未送信の状態をキャッシュから取得
-		yetSentRideStatuses := getChairUnsentStatuses(ride.ID)
-
-		// 未送信の状態がない場合はスキップ
-		if len(yetSentRideStatuses) == 0 {
-			tx.Rollback()
 			return
 		}
 
@@ -269,6 +331,7 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 
 		// 送信済みステータスIDを追跡
 		sentStatusIDs := make([]string, 0, len(yetSentRideStatuses))
+		sentCompleted := false
 
 		// 各未送信状態を順次送信
 		for _, rideStatus := range yetSentRideStatuses {
@@ -312,6 +375,7 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 					tx.Rollback()
 					return
 				}
+				sentCompleted = true
 			}
 		}
 
@@ -322,6 +386,11 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 		// コミット成功後にキャッシュから削除
 		for _, statusID := range sentStatusIDs {
 			markChairStatusSent(ride.ID, statusID)
+		}
+
+		// COMPLETEDが送信された場合、current_ride_idキャッシュをクリア
+		if sentCompleted {
+			setChairCurrentRideID(chair.ID, "")
 		}
 	}
 

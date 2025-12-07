@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,6 +43,103 @@ var (
 	chairUnsentStatuses = make(map[string][]RideStatus)
 	chairUnsentMutex    sync.RWMutex
 )
+
+// Chairキャッシュ (access_token -> *Chair)
+var (
+	chairCacheByAccessToken = make(map[string]*Chair)
+	chairCacheMutex         sync.RWMutex
+)
+
+// 椅子のcurrent_ride_idキャッシュ (chair_id -> ride_id)
+var (
+	chairCurrentRideCache      = make(map[string]string) // 空文字列 = NULLを表す
+	chairCurrentRideCacheMutex sync.RWMutex
+)
+
+// 椅子の最新位置キャッシュ (chair_id -> ChairLocation)
+var (
+	chairLatestLocationCache      = make(map[string]*ChairLocation)
+	chairLatestLocationCacheMutex sync.RWMutex
+)
+
+func getChairByAccessToken(token string) (*Chair, bool) {
+	chairCacheMutex.RLock()
+	defer chairCacheMutex.RUnlock()
+	chair, ok := chairCacheByAccessToken[token]
+	return chair, ok
+}
+
+func setChairCache(token string, chair *Chair) {
+	chairCacheMutex.Lock()
+	defer chairCacheMutex.Unlock()
+	chairCacheByAccessToken[token] = chair
+}
+
+// 椅子のcurrent_ride_idを取得（存在しない場合は空文字列を返す）
+func getChairCurrentRideID(chairID string) (string, bool) {
+	chairCurrentRideCacheMutex.RLock()
+	defer chairCurrentRideCacheMutex.RUnlock()
+	rideID, ok := chairCurrentRideCache[chairID]
+	return rideID, ok
+}
+
+// 椅子のcurrent_ride_idを設定（空文字列でNULLを表す）
+func setChairCurrentRideID(chairID string, rideID string) {
+	chairCurrentRideCacheMutex.Lock()
+	defer chairCurrentRideCacheMutex.Unlock()
+	chairCurrentRideCache[chairID] = rideID
+}
+
+// 椅子の最新位置を取得
+func getChairLatestLocation(chairID string) *ChairLocation {
+	chairLatestLocationCacheMutex.RLock()
+	defer chairLatestLocationCacheMutex.RUnlock()
+	return chairLatestLocationCache[chairID]
+}
+
+// 椅子の最新位置を設定
+func setChairLatestLocation(chairID string, location *ChairLocation) {
+	chairLatestLocationCacheMutex.Lock()
+	defer chairLatestLocationCacheMutex.Unlock()
+	chairLatestLocationCache[chairID] = location
+}
+
+// 椅子の最新位置キャッシュを初期化（DBから読み込み）
+func initChairLatestLocationCache() {
+	chairLatestLocationCacheMutex.Lock()
+	defer chairLatestLocationCacheMutex.Unlock()
+
+	// キャッシュをクリア
+	chairLatestLocationCache = make(map[string]*ChairLocation)
+
+	// chairsテーブルから最新位置を持つ椅子を取得
+	type chairLocation struct {
+		ID                      string     `db:"id"`
+		LatestLatitude          *int       `db:"latest_latitude"`
+		LatestLongitude         *int       `db:"latest_longitude"`
+		LatestLocationUpdatedAt *time.Time `db:"latest_location_updated_at"`
+	}
+	chairs := []chairLocation{}
+	if err := db.Select(&chairs, "SELECT id, latest_latitude, latest_longitude, latest_location_updated_at FROM chairs WHERE latest_latitude IS NOT NULL"); err != nil {
+		slog.Error("failed to load chair locations", "error", err)
+		return
+	}
+
+	for _, c := range chairs {
+		if c.LatestLatitude != nil && c.LatestLongitude != nil {
+			loc := &ChairLocation{
+				ChairID:   c.ID,
+				Latitude:  *c.LatestLatitude,
+				Longitude: *c.LatestLongitude,
+			}
+			if c.LatestLocationUpdatedAt != nil {
+				loc.CreatedAt = *c.LatestLocationUpdatedAt
+			}
+			chairLatestLocationCache[c.ID] = loc
+		}
+	}
+	slog.Info("chair location cache initialized", "count", len(chairLatestLocationCache))
+}
 
 // INSERT後にキャッシュに追加
 func addUnsentStatus(rideID string, status RideStatus) {
@@ -196,6 +294,9 @@ func setup() http.Handler {
 	pproteinHandler := integration.NewDebugHandler()
 	go http.ListenAndServe(":3000", pproteinHandler)
 
+	// 椅子の最新位置キャッシュを初期化
+	initChairLatestLocationCache()
+
 	// chair_locations のバルクインサート用goroutineを起動
 	go bulkInsertChairLocations()
 
@@ -246,6 +347,19 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	chairUnsentMutex.Lock()
 	chairUnsentStatuses = make(map[string][]RideStatus)
 	chairUnsentMutex.Unlock()
+
+	// Chairキャッシュをクリア
+	chairCacheMutex.Lock()
+	chairCacheByAccessToken = make(map[string]*Chair)
+	chairCacheMutex.Unlock()
+
+	// chairCurrentRideCacheをクリア
+	chairCurrentRideCacheMutex.Lock()
+	chairCurrentRideCache = make(map[string]string)
+	chairCurrentRideCacheMutex.Unlock()
+
+	// 椅子の最新位置キャッシュを初期化（DBから読み込み）
+	initChairLatestLocationCache()
 
 	go func() {
 		if _, err := http.Get("http://172.31.14.32:9000/api/group/collect"); err != nil {
@@ -328,9 +442,15 @@ func insertChairLocationsBulk(locations []ChairLocation) {
 		return
 	}
 
-	// sqlx.NamedExecを使ってバルクインサート
-	query := `INSERT INTO chair_locations (id, chair_id, latitude, longitude, created_at) VALUES (:id, :chair_id, :latitude, :longitude, :created_at)`
-	_, err := db.NamedExec(query, locations)
+	// 真のバルクインサート: INSERT INTO ... VALUES (...), (...), ...
+	valueStrings := make([]string, 0, len(locations))
+	valueArgs := make([]interface{}, 0, len(locations)*5)
+	for _, loc := range locations {
+		valueStrings = append(valueStrings, "(?, ?, ?, ?, ?)")
+		valueArgs = append(valueArgs, loc.ID, loc.ChairID, loc.Latitude, loc.Longitude, loc.CreatedAt)
+	}
+	query := "INSERT INTO chair_locations (id, chair_id, latitude, longitude, created_at) VALUES " + strings.Join(valueStrings, ",")
+	_, err := db.Exec(query, valueArgs...)
 	if err != nil {
 		slog.Error("bulk insert chair_locations failed", "error", err, "count", len(locations))
 	}

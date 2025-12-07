@@ -10,27 +10,23 @@ import (
 func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// 原点付近
-	matchingA(w, ctx)
-
-	// 原点から遠方
-	matchingB(w, ctx)
+	matchingAroundOrigin(w, ctx)
+	matchingFarFromOrigin(w, ctx)
 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func matchingA(w http.ResponseWriter, ctx context.Context) {
+func matchingAroundOrigin(w http.ResponseWriter, ctx context.Context) {
 	// トランザクション開始
 	tx, err := db.Beginx()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	defer tx.Rollback()
 
-	// 原点付近のマッチング待ちのライドをすべて取得
+	// マッチング待ちのライドをすべて取得
 	rides := []Ride{}
-	if err := tx.SelectContext(ctx, &rides, `SELECT * FROM rides WHERE chair_id IS NULL AND pickup_latitude < 150 ORDER BY created_at`); err != nil {
+	if err := tx.SelectContext(ctx, &rides, `SELECT * FROM rides WHERE chair_id IS NULL AND pickup_latitude <= 150 ORDER BY created_at`); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -39,7 +35,7 @@ func matchingA(w http.ResponseWriter, ctx context.Context) {
 		return
 	}
 
-	// 原点付近の利用可能な椅子をすべて取得
+	// 利用可能な椅子をすべて取得
 	availableChairs := []Chair{}
 	if err := tx.SelectContext(ctx, &availableChairs, `
 		SELECT
@@ -49,7 +45,7 @@ func matchingA(w http.ResponseWriter, ctx context.Context) {
 		FROM chairs c
 		WHERE c.is_active = TRUE
 		AND c.latest_latitude IS NOT NULL
-		AND c.latest_latitude < 150
+		AND c.latest_latitude <= 150
 		AND c.latest_longitude IS NOT NULL
 		AND c.current_ride_id IS NULL
 	`); err != nil {
@@ -98,6 +94,7 @@ func matchingA(w http.ResponseWriter, ctx context.Context) {
 				chairID: bestChair.ID,
 				userID:  ride.UserID,
 			})
+			setChairCurrentRideID(bestChair.ID, ride.ID)
 		}
 	}
 
@@ -110,6 +107,7 @@ func matchingA(w http.ResponseWriter, ctx context.Context) {
 	// CASE文を使って一括更新
 	rideIDs := make([]string, len(matches))
 	for i, m := range matches {
+		// キャッシュを更新
 		rideIDs[i] = m.rideID
 	}
 
@@ -177,18 +175,17 @@ func matchingA(w http.ResponseWriter, ctx context.Context) {
 	}
 }
 
-func matchingB(w http.ResponseWriter, ctx context.Context) {
+func matchingFarFromOrigin(w http.ResponseWriter, ctx context.Context) {
 	// トランザクション開始
 	tx, err := db.Beginx()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	defer tx.Rollback()
 
-	// 原点から遠方のマッチング待ちのライドをすべて取得
+	// マッチング待ちのライドをすべて取得
 	rides := []Ride{}
-	if err := tx.SelectContext(ctx, &rides, `SELECT * FROM rides WHERE chair_id IS NULL AND pickup_latitude >= 150 ORDER BY created_at`); err != nil {
+	if err := tx.SelectContext(ctx, &rides, `SELECT * FROM rides WHERE chair_id IS NULL AND pickup_latitude > 150 ORDER BY created_at`); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -197,7 +194,7 @@ func matchingB(w http.ResponseWriter, ctx context.Context) {
 		return
 	}
 
-	// 原点から遠方利用可能な椅子をすべて取得
+	// 利用可能な椅子をすべて取得
 	availableChairs := []Chair{}
 	if err := tx.SelectContext(ctx, &availableChairs, `
 		SELECT
@@ -207,7 +204,7 @@ func matchingB(w http.ResponseWriter, ctx context.Context) {
 		FROM chairs c
 		WHERE c.is_active = TRUE
 		AND c.latest_latitude IS NOT NULL
-		AND c.latest_latitude >= 150
+		AND c.latest_latitude > 150
 		AND c.latest_longitude IS NOT NULL
 		AND c.current_ride_id IS NULL
 	`); err != nil {
@@ -256,6 +253,7 @@ func matchingB(w http.ResponseWriter, ctx context.Context) {
 				chairID: bestChair.ID,
 				userID:  ride.UserID,
 			})
+			setChairCurrentRideID(bestChair.ID, ride.ID)
 		}
 	}
 
@@ -268,6 +266,7 @@ func matchingB(w http.ResponseWriter, ctx context.Context) {
 	// CASE文を使って一括更新
 	rideIDs := make([]string, len(matches))
 	for i, m := range matches {
+		// キャッシュを更新
 		rideIDs[i] = m.rideID
 	}
 
