@@ -64,7 +64,7 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 			distance := abs(*chair.LatestLatitude-ride.PickupLatitude) + abs(*chair.LatestLongitude-ride.PickupLongitude)
 			if distance < bestDistance {
 				bestDistance = distance
-				bestChair = &chair
+				bestChair = &availableChairs[i]
 			}
 		}
 
