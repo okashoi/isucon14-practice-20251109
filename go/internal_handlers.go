@@ -23,12 +23,15 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 	// 利用可能な椅子をすべて取得
 	availableChairs := []Chair{}
 	if err := db.SelectContext(ctx, &availableChairs, `
-		SELECT *
-		FROM chairs
-		WHERE is_active = TRUE
-		AND latest_latitude IS NOT NULL
-		AND latest_longitude IS NOT NULL
-		AND current_ride_id IS NULL
+		SELECT 
+		    c.id,
+		    c.latest_latitude,
+		    c.latest_longitude,
+		FROM chairs c
+		WHERE c.is_active = TRUE
+		AND c.latest_latitude IS NOT NULL
+		AND c.latest_longitude IS NOT NULL
+		AND c.current_ride_id IS NULL
 	`); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
