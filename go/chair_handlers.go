@@ -173,7 +173,7 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// コミット成功後にキャッシュに追加
+	// コミット成功後にキャッシュに追加（app用のみ）
 	if insertedStatusID != "" {
 		addUnsentStatus(insertedRideID, RideStatus{
 			ID:        insertedStatusID,
@@ -181,6 +181,16 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 			Status:    insertedStatusName,
 			CreatedAt: insertedStatusCreatedAt,
 		})
+
+		// イスへの通知を即座に送信
+		notificationMutex.RLock()
+		if ch, ok := chairNotificationChannels[chair.ID]; ok {
+			select {
+			case ch <- struct{}{}:
+			default: // ブロッキング回避
+			}
+		}
+		notificationMutex.RUnlock()
 	}
 
 	writeJSON(w, http.StatusOK, &chairPostCoordinateResponse{
@@ -251,8 +261,12 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// 未送信の状態をキャッシュから取得
-		yetSentRideStatuses := getChairUnsentStatuses(ride.ID)
+		// 未送信の状態をDBから直接取得
+		yetSentRideStatuses, err := getChairUnsentStatuses(ctx, tx, ride.ID)
+		if err != nil {
+			tx.Rollback()
+			return
+		}
 
 		// 未送信の状態がない場合はスキップ
 		if len(yetSentRideStatuses) == 0 {
@@ -266,9 +280,6 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 			tx.Rollback()
 			return
 		}
-
-		// 送信済みステータスIDを追跡
-		sentStatusIDs := make([]string, 0, len(yetSentRideStatuses))
 
 		// 各未送信状態を順次送信
 		for _, rideStatus := range yetSentRideStatuses {
@@ -304,7 +315,6 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 				tx.Rollback()
 				return
 			}
-			sentStatusIDs = append(sentStatusIDs, rideStatus.ID)
 
 			// COMPLETEDステータスを椅子に通知した場合、current_ride_idをクリア
 			if rideStatus.Status == "COMPLETED" {
@@ -317,11 +327,6 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 
 		if err := tx.Commit(); err != nil {
 			return
-		}
-
-		// コミット成功後にキャッシュから削除
-		for _, statusID := range sentStatusIDs {
-			markChairStatusSent(ride.ID, statusID)
 		}
 	}
 
@@ -420,13 +425,23 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// コミット成功後にキャッシュに追加
+	// コミット成功後にキャッシュに追加（app用のみ）
 	addUnsentStatus(ride.ID, RideStatus{
 		ID:        statusID,
 		RideID:    ride.ID,
 		Status:    statusName,
 		CreatedAt: statusCreatedAt,
 	})
+
+	// イスへの通知を即座に送信
+	notificationMutex.RLock()
+	if ch, ok := chairNotificationChannels[chair.ID]; ok {
+		select {
+		case ch <- struct{}{}:
+		default: // ブロッキング回避
+		}
+	}
+	notificationMutex.RUnlock()
 
 	w.WriteHeader(http.StatusNoContent)
 }
