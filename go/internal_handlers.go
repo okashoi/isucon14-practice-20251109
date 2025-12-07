@@ -131,23 +131,23 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// pickup座標に近い空いている椅子を取得してアサイン
+	// pickup座標に最も早く到着できる椅子を取得してアサイン
+	// 到着時間 = 距離 / スピード でソート
 	matched := &Chair{}
 	query := `
 		SELECT c.*
 		FROM chairs c
+		INNER JOIN chair_models cm ON c.model = cm.name
 		WHERE c.is_active = TRUE
 		AND c.latest_latitude IS NOT NULL
 		AND c.latest_longitude IS NOT NULL
 		AND c.current_ride_id IS NULL
 		ORDER BY 
-			(c.latest_latitude - ?) * (c.latest_latitude - ?) + 
-			(c.latest_longitude - ?) * (c.latest_longitude - ?)
+			(ABS(c.latest_latitude - ?) + ABS(c.latest_longitude - ?)) / cm.speed
 		LIMIT 1
 	`
 	if err := db.GetContext(ctx, matched, query,
-		ride.PickupLatitude, ride.PickupLatitude,
-		ride.PickupLongitude, ride.PickupLongitude,
+		ride.PickupLatitude, ride.PickupLongitude,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			w.WriteHeader(http.StatusNoContent)
