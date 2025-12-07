@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"time"
 )
 
 // 最小費用流アルゴリズム用のエッジ構造体
@@ -131,24 +132,48 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// pickup座標に最も早く到着できる椅子を取得してアサイン
-	// 到着時間 = 距離 / スピード でソート
+	// 待ち時間を計算
+	waitSeconds := time.Since(ride.CreatedAt).Seconds()
+
 	matched := &Chair{}
-	query := `
-		SELECT c.*
-		FROM chairs c
-		INNER JOIN chair_models cm ON c.model = cm.name
-		WHERE c.is_active = TRUE
-		AND c.latest_latitude IS NOT NULL
-		AND c.latest_longitude IS NOT NULL
-		AND c.current_ride_id IS NULL
-		ORDER BY 
-			(ABS(c.latest_latitude - ?) + ABS(c.latest_longitude - ?)) / cm.speed
-		LIMIT 1
-	`
-	if err := db.GetContext(ctx, matched, query,
-		ride.PickupLatitude, ride.PickupLongitude,
-	); err != nil {
+	var err error
+
+	if waitSeconds >= 25 {
+		// 25秒以上待っている場合は、最も近い椅子を優先（スピード無視で緊急マッチング）
+		query := `
+			SELECT c.*
+			FROM chairs c
+			WHERE c.is_active = TRUE
+			AND c.latest_latitude IS NOT NULL
+			AND c.latest_longitude IS NOT NULL
+			AND c.current_ride_id IS NULL
+			ORDER BY 
+				ABS(c.latest_latitude - ?) + ABS(c.latest_longitude - ?)
+			LIMIT 1
+		`
+		err = db.GetContext(ctx, matched, query,
+			ride.PickupLatitude, ride.PickupLongitude,
+		)
+	} else {
+		// 通常: 最も早く到着できる椅子を取得（到着時間 = 距離 / スピード）
+		query := `
+			SELECT c.*
+			FROM chairs c
+			INNER JOIN chair_models cm ON c.model = cm.name
+			WHERE c.is_active = TRUE
+			AND c.latest_latitude IS NOT NULL
+			AND c.latest_longitude IS NOT NULL
+			AND c.current_ride_id IS NULL
+			ORDER BY 
+				(ABS(c.latest_latitude - ?) + ABS(c.latest_longitude - ?)) / cm.speed
+			LIMIT 1
+		`
+		err = db.GetContext(ctx, matched, query,
+			ride.PickupLatitude, ride.PickupLongitude,
+		)
+	}
+
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			w.WriteHeader(http.StatusNoContent)
 			return
