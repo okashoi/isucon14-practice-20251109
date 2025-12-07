@@ -38,7 +38,7 @@ var (
 )
 
 var (
-	matchingChan = make(chan struct{}, 1000)
+	matchingChan = make(chan string, 1000)
 )
 
 // 未送信ステータスのキャッシュ (ride_id -> []RideStatus)
@@ -300,7 +300,10 @@ func setup() http.Handler {
 	// chair_locations のバルクインサート用goroutineを起動
 	go bulkInsertChairLocations()
 
-	go matchingWorker()
+	// マッチングワーカーを3並列で起動
+	for i := 0; i < 3; i++ {
+		go matchingWorker()
+	}
 
 	return mux
 }
@@ -460,7 +463,9 @@ func insertChairLocationsBulk(locations []ChairLocation) {
 
 func matchingWorker() {
 	ctx := context.Background()
-	for range matchingChan {
-		runMatching(ctx)
+	for rideID := range matchingChan {
+		if err := runMatching(ctx, rideID); err != nil {
+			matchingChan <- rideID
+		}
 	}
 }
