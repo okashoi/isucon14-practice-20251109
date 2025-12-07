@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	initialFare     = 100
+	initialFare     = 500
 	farePerDistance = 100
 )
 
