@@ -300,7 +300,7 @@ func secureRandomStr(b int) string {
 
 // chair_locations のバルクインサート処理
 func bulkInsertChairLocations() {
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 
 	for range ticker.C {
