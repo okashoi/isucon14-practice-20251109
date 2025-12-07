@@ -3,8 +3,120 @@ package main
 import (
 	"database/sql"
 	"errors"
+	"math"
 	"net/http"
 )
+
+// 最小費用流アルゴリズム用のエッジ構造体
+type Edge struct {
+	to   int   // 行き先ノード
+	cap  int   // 容量
+	cost int64 // コスト
+	rev  int   // 逆辺のインデックス
+}
+
+// 最小費用流を計算するための構造体
+type MinCostFlow struct {
+	graph [][]Edge // 隣接リスト表現のグラフ
+	n     int      // ノード数
+}
+
+// NewMinCostFlow は指定したノード数で MinCostFlow を初期化する
+func NewMinCostFlow(n int) *MinCostFlow {
+	graph := make([][]Edge, n)
+	for i := range graph {
+		graph[i] = make([]Edge, 0)
+	}
+	return &MinCostFlow{graph: graph, n: n}
+}
+
+// AddEdge はグラフにエッジを追加する（逆辺も同時に追加）
+func (mcf *MinCostFlow) AddEdge(from, to, cap int, cost int64) {
+	mcf.graph[from] = append(mcf.graph[from], Edge{to: to, cap: cap, cost: cost, rev: len(mcf.graph[to])})
+	mcf.graph[to] = append(mcf.graph[to], Edge{to: from, cap: 0, cost: -cost, rev: len(mcf.graph[from]) - 1})
+}
+
+// bellmanFord は source から各ノードへの最短距離を計算する
+// 戻り値: (距離配列, 直前ノード配列, 直前エッジ配列, 到達可能かどうか)
+func (mcf *MinCostFlow) bellmanFord(source, sink int) ([]int64, []int, []int, bool) {
+	const INF = math.MaxInt64
+
+	dist := make([]int64, mcf.n)
+	prevNode := make([]int, mcf.n)
+	prevEdge := make([]int, mcf.n)
+
+	for i := range dist {
+		dist[i] = INF
+		prevNode[i] = -1
+		prevEdge[i] = -1
+	}
+	dist[source] = 0
+
+	// Bellman-Ford法: 最大 n-1 回の緩和
+	for i := 0; i < mcf.n; i++ {
+		updated := false
+		for v := 0; v < mcf.n; v++ {
+			if dist[v] == INF {
+				continue
+			}
+			for ei, e := range mcf.graph[v] {
+				if e.cap > 0 && dist[v]+e.cost < dist[e.to] {
+					dist[e.to] = dist[v] + e.cost
+					prevNode[e.to] = v
+					prevEdge[e.to] = ei
+					updated = true
+				}
+			}
+		}
+		if !updated {
+			break
+		}
+	}
+
+	return dist, prevNode, prevEdge, dist[sink] != INF
+}
+
+// MinCostFlowResult はマッチング結果を表す
+type MinCostFlowResult struct {
+	flow int
+	cost int64
+}
+
+// Run は source から sink への最小費用最大流を計算する
+// 戻り値: (流量, 総コスト)
+func (mcf *MinCostFlow) Run(source, sink, maxFlow int) MinCostFlowResult {
+	totalFlow := 0
+	totalCost := int64(0)
+
+	for totalFlow < maxFlow {
+		// 最短経路を探索
+		dist, prevNode, prevEdge, reachable := mcf.bellmanFord(source, sink)
+		if !reachable {
+			break
+		}
+
+		// 経路上の最小容量を計算
+		minCap := maxFlow - totalFlow
+		for v := sink; v != source; v = prevNode[v] {
+			e := mcf.graph[prevNode[v]][prevEdge[v]]
+			if e.cap < minCap {
+				minCap = e.cap
+			}
+		}
+
+		// フローを流す
+		for v := sink; v != source; v = prevNode[v] {
+			e := &mcf.graph[prevNode[v]][prevEdge[v]]
+			e.cap -= minCap
+			mcf.graph[v][e.rev].cap += minCap
+		}
+
+		totalFlow += minCap
+		totalCost += dist[sink] * int64(minCap)
+	}
+
+	return MinCostFlowResult{flow: totalFlow, cost: totalCost}
+}
 
 // このAPIをインスタンス内から一定間隔で叩かせることで、椅子とライドをマッチングさせる
 func internalGetMatching(w http.ResponseWriter, r *http.Request) {
