@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	crand "crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -36,6 +37,7 @@ var (
 	chairLocationBufferMutex sync.Mutex
 )
 
+
 // chairs更新用バッファ
 type ChairUpdateData struct {
 	LatestLatitude          int
@@ -47,6 +49,7 @@ type ChairUpdateData struct {
 var (
 	chairUpdateBuffer      = make(map[string]*ChairUpdateData)
 	chairUpdateBufferMutex sync.Mutex
+	matchingChan = make(chan struct{}, 1000)
 )
 
 // 未送信ステータスのキャッシュ (ride_id -> []RideStatus)
@@ -299,11 +302,6 @@ func setup() http.Handler {
 		authedMux.HandleFunc("POST /api/chair/rides/{ride_id}/status", chairPostRideStatus)
 	}
 
-	// internal handlers
-	{
-		mux.HandleFunc("GET /api/internal/matching", internalGetMatching)
-	}
-
 	pproteinHandler := integration.NewDebugHandler()
 	go http.ListenAndServe(":3000", pproteinHandler)
 
@@ -313,8 +311,11 @@ func setup() http.Handler {
 	// chair_locations のバルクインサート用goroutineを起動
 	go bulkInsertChairLocations()
 
+
 	// chairs テーブルのバルク更新用goroutineを起動
 	go bulkUpdateChairs()
+
+	go matchingWorker()
 
 	return mux
 }
@@ -562,5 +563,11 @@ func updateChairsBulk(updates map[string]*ChairUpdateData) {
 	_, err := db.Exec(query, args...)
 	if err != nil {
 		slog.Error("bulk update chairs failed", "error", err, "count", len(updates))
+
+func matchingWorker() {
+	ctx := context.Background()
+	for range matchingChan {
+		runMatching(ctx)
+
 	}
 }

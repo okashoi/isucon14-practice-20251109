@@ -427,6 +427,8 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: rideStatusCreatedAt,
 	})
 
+	matchingChan <- struct{}{}
+
 	writeJSON(w, http.StatusAccepted, &appPostRidesResponse{
 		RideID: rideID,
 		Fare:   fare,
