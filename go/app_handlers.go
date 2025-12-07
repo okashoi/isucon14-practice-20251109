@@ -14,6 +14,87 @@ import (
 	"github.com/oklog/ulid/v2"
 )
 
+// app用通知送信関数（goroutineで非同期実行）
+func sendAppNotification(rideID, statusID, status string) {
+	go func() {
+		ctx := context.Background()
+		tx, err := db.Beginx()
+		if err != nil {
+			return
+		}
+		defer tx.Rollback()
+
+		ride := &Ride{}
+		if err := tx.GetContext(ctx, ride, `SELECT *, latest_status FROM rides WHERE id = ?`, rideID); err != nil {
+			return
+		}
+
+		user := &User{}
+		if err := tx.GetContext(ctx, user, `SELECT * FROM users WHERE id = ?`, ride.UserID); err != nil {
+			return
+		}
+
+		fare, err := calculateDiscountedFare(ctx, tx, ride.UserID, ride, ride.PickupLatitude, ride.PickupLongitude, ride.DestinationLatitude, ride.DestinationLongitude)
+		if err != nil {
+			return
+		}
+
+		responseData := &appGetNotificationResponseData{
+			RideID: ride.ID,
+			PickupCoordinate: Coordinate{
+				Latitude:  ride.PickupLatitude,
+				Longitude: ride.PickupLongitude,
+			},
+			DestinationCoordinate: Coordinate{
+				Latitude:  ride.DestinationLatitude,
+				Longitude: ride.DestinationLongitude,
+			},
+			Fare:      fare,
+			Status:    status,
+			CreatedAt: ride.CreatedAt.UnixMilli(),
+			UpdateAt:  ride.UpdatedAt.UnixMilli(),
+		}
+
+		if ride.ChairID.Valid {
+			chair := &Chair{}
+			if err := tx.GetContext(ctx, chair, `SELECT * FROM chairs WHERE id = ?`, ride.ChairID); err != nil {
+				return
+			}
+
+			stats, err := getChairStats(ctx, tx, chair.ID)
+			if err != nil {
+				return
+			}
+
+			responseData.Chair = &appGetNotificationResponseChair{
+				ID:    chair.ID,
+				Name:  chair.Name,
+				Model: chair.Model,
+				Stats: stats,
+			}
+		}
+
+		// 送信済みマーク
+		if _, err := tx.ExecContext(ctx, `UPDATE ride_statuses SET app_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, statusID); err != nil {
+			return
+		}
+
+		if err := tx.Commit(); err != nil {
+			return
+		}
+
+		// チャネルに送信
+		notificationMutex.RLock()
+		if ch, ok := appNotificationChannels[ride.UserID]; ok {
+			select {
+			case ch <- responseData:
+			default: // ブロッキング回避
+			}
+		}
+		notificationMutex.RUnlock()
+	}()
+}
+
 type appPostUsersRequest struct {
 	Username       string  `json:"username"`
 	FirstName      string  `json:"firstname"`
@@ -332,7 +413,6 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rideStatusID := ulid.Make().String()
-	rideStatusCreatedAt := time.Now()
 	if _, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)`,
@@ -419,13 +499,8 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// コミット成功後にキャッシュに追加
-	addUnsentStatus(rideID, RideStatus{
-		ID:        rideStatusID,
-		RideID:    rideID,
-		Status:    "MATCHING",
-		CreatedAt: rideStatusCreatedAt,
-	})
+	// コミット成功後に通知送信
+	sendAppNotification(rideID, rideStatusID, "MATCHING")
 
 	writeJSON(w, http.StatusAccepted, &appPostRidesResponse{
 		RideID: rideID,
@@ -553,7 +628,6 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	completedStatusID := ulid.Make().String()
-	completedStatusCreatedAt := time.Now()
 	_, err = tx.ExecContext(
 		ctx,
 		`INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)`,
@@ -617,13 +691,8 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// コミット成功後にキャッシュに追加
-	addUnsentStatus(rideID, RideStatus{
-		ID:        completedStatusID,
-		RideID:    rideID,
-		Status:    "COMPLETED",
-		CreatedAt: completedStatusCreatedAt,
-	})
+	// コミット成功後に通知送信
+	sendAppNotification(rideID, completedStatusID, "COMPLETED")
 
 	writeJSON(w, http.StatusOK, &appPostRideEvaluationResponse{
 		CompletedAt: ride.UpdatedAt.UnixMilli(),
@@ -675,7 +744,7 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// チャネル登録
-	notifyChan := make(chan struct{}, 10)
+	notifyChan := make(chan *appGetNotificationResponseData, 10)
 	notificationMutex.Lock()
 	appNotificationChannels[user.ID] = notifyChan
 	notificationMutex.Unlock()
@@ -687,121 +756,21 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 		close(notifyChan)
 	}()
 
-	// 未送信の状態遷移を全て送信する関数
-	sendNotifications := func() {
-		tx, err := db.Beginx()
-		if err != nil {
-			return
-		}
-
-		ride := &Ride{}
-		if err := tx.GetContext(ctx, ride, `SELECT *, latest_status FROM rides WHERE user_id = ? ORDER BY created_at DESC LIMIT 1`, user.ID); err != nil {
-			tx.Rollback()
-			if errors.Is(err, sql.ErrNoRows) {
-				return
-			}
-			return
-		}
-
-		// 未送信の状態をキャッシュから取得
-		yetSentRideStatuses := getAppUnsentStatuses(ride.ID)
-
-		// 未送信の状態がない場合はスキップ
-		if len(yetSentRideStatuses) == 0 {
-			tx.Rollback()
-			return
-		}
-
-		// 送信済みステータスIDを追跡
-		sentStatusIDs := make([]string, 0, len(yetSentRideStatuses))
-
-		// 各未送信状態を順次送信
-		for _, rideStatus := range yetSentRideStatuses {
-			fare, err := calculateDiscountedFare(ctx, tx, user.ID, ride, ride.PickupLatitude, ride.PickupLongitude, ride.DestinationLatitude, ride.DestinationLongitude)
-			if err != nil {
-				tx.Rollback()
-				return
-			}
-
-			responseData := &appGetNotificationResponseData{
-				RideID: ride.ID,
-				PickupCoordinate: Coordinate{
-					Latitude:  ride.PickupLatitude,
-					Longitude: ride.PickupLongitude,
-				},
-				DestinationCoordinate: Coordinate{
-					Latitude:  ride.DestinationLatitude,
-					Longitude: ride.DestinationLongitude,
-				},
-				Fare:      fare,
-				Status:    rideStatus.Status,
-				CreatedAt: ride.CreatedAt.UnixMilli(),
-				UpdateAt:  ride.UpdatedAt.UnixMilli(),
-			}
-
-			if ride.ChairID.Valid {
-				chair := &Chair{}
-				if err := tx.GetContext(ctx, chair, `SELECT * FROM chairs WHERE id = ?`, ride.ChairID); err != nil {
-					tx.Rollback()
-					return
-				}
-
-				stats, err := getChairStats(ctx, tx, chair.ID)
-				if err != nil {
-					tx.Rollback()
-					return
-				}
-
-				responseData.Chair = &appGetNotificationResponseChair{
-					ID:    chair.ID,
-					Name:  chair.Name,
-					Model: chair.Model,
-					Stats: stats,
-				}
-			}
-
-			// SSE形式で送信
-			data, err := json.Marshal(responseData)
-			if err != nil {
-				tx.Rollback()
-				return
-			}
-			fmt.Fprintf(w, "data:%s\n\n", data)
-			flusher.Flush()
-
-			// 送信済みマーク
-			_, err = tx.ExecContext(ctx, `UPDATE ride_statuses SET app_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, rideStatus.ID)
-			if err != nil {
-				tx.Rollback()
-				return
-			}
-			sentStatusIDs = append(sentStatusIDs, rideStatus.ID)
-		}
-
-		if err := tx.Commit(); err != nil {
-			return
-		}
-
-		// コミット成功後にキャッシュから削除
-		for _, statusID := range sentStatusIDs {
-			markAppStatusSent(ride.ID, statusID)
-		}
-	}
-
-	// フォールバック用のticker (500ms間隔)
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-notifyChan:
-			// マッチング成立時に即座に通知
-			sendNotifications()
-		case <-ticker.C:
-			// フォールバック: 定期的にもチェック
-			sendNotifications()
+		case responseData := <-notifyChan:
+			if responseData == nil {
+				continue
+			}
+			// SSE形式で送信
+			data, err := json.Marshal(responseData)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "data:%s\n\n", data)
+			flusher.Flush()
 		}
 	}
 }
