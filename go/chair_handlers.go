@@ -288,9 +288,13 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 		// キャッシュからcurrent_ride_idを取得
 		currentRideID, cacheHit := getChairCurrentRideID(chair.ID)
 		if !cacheHit {
-			// キャッシュミス時はDBから取得してキャッシュを更新
-			if chair.CurrentRideID.Valid {
-				currentRideID = chair.CurrentRideID.String
+			// キャッシュミス時はDBから直接取得
+			var dbCurrentRideID sql.NullString
+			if err := db.GetContext(ctx, &dbCurrentRideID,
+				"SELECT current_ride_id FROM chairs WHERE id = ?", chair.ID); err == nil {
+				if dbCurrentRideID.Valid {
+					currentRideID = dbCurrentRideID.String
+				}
 			}
 			setChairCurrentRideID(chair.ID, currentRideID)
 		}
@@ -302,14 +306,26 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 
 		// 未送信の状態をキャッシュから取得
 		yetSentRideStatuses := getChairUnsentStatuses(currentRideID)
-
-		// 未送信の状態がない場合はスキップ（DBアクセス前に判定）
-		if len(yetSentRideStatuses) == 0 {
-			return
-		}
+		fromCache := len(yetSentRideStatuses) > 0
 
 		tx, err := db.Beginx()
 		if err != nil {
+			return
+		}
+
+		// キャッシュが空の場合はDBから取得（フォールバック）
+		if !fromCache {
+			if err := tx.SelectContext(ctx, &yetSentRideStatuses,
+				`SELECT * FROM ride_statuses WHERE ride_id = ? AND chair_sent_at IS NULL ORDER BY created_at`,
+				currentRideID); err != nil {
+				tx.Rollback()
+				return
+			}
+		}
+
+		// まだ空ならスキップ
+		if len(yetSentRideStatuses) == 0 {
+			tx.Rollback()
 			return
 		}
 
