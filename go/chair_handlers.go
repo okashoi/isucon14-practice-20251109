@@ -248,17 +248,19 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// チャネル登録
-	notifyChan := make(chan struct{}, 10)
+	conn := &notificationConnection{
+		w:       w,
+		flusher: flusher,
+		ctx:     ctx,
+	}
 	notificationMutex.Lock()
-	chairNotificationChannels[chair.ID] = notifyChan
+	chairNotificationConnections[chair.ID] = conn
 	notificationMutex.Unlock()
 
 	defer func() {
 		notificationMutex.Lock()
-		delete(chairNotificationChannels, chair.ID)
+		delete(chairNotificationConnections, chair.ID)
 		notificationMutex.Unlock()
-		close(notifyChan)
 	}()
 
 	// 未送信の状態遷移を全て送信する関数
@@ -372,22 +374,9 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// フォールバック用のticker (500ms間隔)
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
+	sendNotifications()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-notifyChan:
-			// マッチング成立時に即座に通知
-			sendNotifications()
-		case <-ticker.C:
-			// フォールバック: 定期的にもチェック
-			sendNotifications()
-		}
-	}
+	<-ctx.Done()
 }
 
 type postChairRidesRideIDStatusRequest struct {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	crand "crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -22,11 +23,16 @@ import (
 
 var db *sqlx.DB
 
-// 通知チャネル管理
+type notificationConnection struct {
+	w       http.ResponseWriter
+	flusher http.Flusher
+	ctx     context.Context
+}
+
 var (
-	appNotificationChannels   = make(map[string]chan struct{})
-	chairNotificationChannels = make(map[string]chan struct{})
-	notificationMutex         sync.RWMutex
+	appNotificationConnections   = make(map[string]*notificationConnection)
+	chairNotificationConnections = make(map[string]*notificationConnection)
+	notificationMutex            sync.RWMutex
 )
 
 // chair_locations のバッファリング用
@@ -83,7 +89,6 @@ func setChairCurrentRideID(chairID string, rideID string) {
 	chairCurrentRideCache[chairID] = rideID
 }
 
-// INSERT後にキャッシュに追加
 func addUnsentStatus(rideID string, status RideStatus) {
 	appUnsentMutex.Lock()
 	appUnsentStatuses[rideID] = append(appUnsentStatuses[rideID], status)
@@ -92,6 +97,25 @@ func addUnsentStatus(rideID string, status RideStatus) {
 	chairUnsentMutex.Lock()
 	chairUnsentStatuses[rideID] = append(chairUnsentStatuses[rideID], status)
 	chairUnsentMutex.Unlock()
+
+	var ride Ride
+	if err := db.Get(&ride, `SELECT user_id, chair_id FROM rides WHERE id = ?`, rideID); err != nil {
+		return
+	}
+
+	notificationMutex.RLock()
+	if conn, ok := appNotificationConnections[ride.UserID]; ok {
+		go sendAppNotification(conn, rideID, status)
+	}
+	notificationMutex.RUnlock()
+
+	if ride.ChairID.Valid {
+		notificationMutex.RLock()
+		if conn, ok := chairNotificationConnections[ride.ChairID.String]; ok {
+			go sendChairNotification(conn, rideID, status)
+		}
+		notificationMutex.RUnlock()
+	}
 }
 
 // app用: 未送信ステータス取得（SELECTの代わり）
@@ -268,10 +292,9 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 通知チャネルをクリア
 	notificationMutex.Lock()
-	appNotificationChannels = make(map[string]chan struct{})
-	chairNotificationChannels = make(map[string]chan struct{})
+	appNotificationConnections = make(map[string]*notificationConnection)
+	chairNotificationConnections = make(map[string]*notificationConnection)
 	notificationMutex.Unlock()
 
 	// chair_locationsバッファをクリア
@@ -384,4 +407,158 @@ func insertChairLocationsBulk(locations []ChairLocation) {
 	if err != nil {
 		slog.Error("bulk insert chair_locations failed", "error", err, "count", len(locations))
 	}
+}
+
+func sendAppNotification(conn *notificationConnection, rideID string, status RideStatus) {
+	select {
+	case <-conn.ctx.Done():
+		return
+	default:
+	}
+
+	tx, err := db.Beginx()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+
+	ride := &Ride{}
+	if err := tx.GetContext(conn.ctx, ride, `SELECT *, latest_status FROM rides WHERE id = ?`, rideID); err != nil {
+		return
+	}
+
+	userID := ride.UserID
+
+	fare, err := calculateDiscountedFare(conn.ctx, tx, userID, ride, ride.PickupLatitude, ride.PickupLongitude, ride.DestinationLatitude, ride.DestinationLongitude)
+	if err != nil {
+		return
+	}
+
+	responseData := &appGetNotificationResponseData{
+		RideID: ride.ID,
+		PickupCoordinate: Coordinate{
+			Latitude:  ride.PickupLatitude,
+			Longitude: ride.PickupLongitude,
+		},
+		DestinationCoordinate: Coordinate{
+			Latitude:  ride.DestinationLatitude,
+			Longitude: ride.DestinationLongitude,
+		},
+		Fare:      fare,
+		Status:    status.Status,
+		CreatedAt: ride.CreatedAt.UnixMilli(),
+		UpdateAt:  ride.UpdatedAt.UnixMilli(),
+	}
+
+	if ride.ChairID.Valid {
+		chair := &Chair{}
+		if err := tx.GetContext(conn.ctx, chair, `SELECT * FROM chairs WHERE id = ?`, ride.ChairID); err != nil {
+			return
+		}
+
+		stats, err := getChairStats(conn.ctx, tx, chair.ID)
+		if err != nil {
+			return
+		}
+
+		responseData.Chair = &appGetNotificationResponseChair{
+			ID:    chair.ID,
+			Name:  chair.Name,
+			Model: chair.Model,
+			Stats: stats,
+		}
+	}
+
+	data, err := json.Marshal(responseData)
+	if err != nil {
+		return
+	}
+
+	_, err = tx.ExecContext(conn.ctx, `UPDATE ride_statuses SET app_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, status.ID)
+	if err != nil {
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		return
+	}
+
+	markAppStatusSent(rideID, status.ID)
+
+	fmt.Fprintf(conn.w, "data:%s\n\n", data)
+	conn.flusher.Flush()
+}
+
+func sendChairNotification(conn *notificationConnection, rideID string, status RideStatus) {
+	select {
+	case <-conn.ctx.Done():
+		return
+	default:
+	}
+
+	tx, err := db.Beginx()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+
+	ride := &Ride{}
+	if err := tx.GetContext(conn.ctx, ride, `SELECT * FROM rides WHERE id = ?`, rideID); err != nil {
+		return
+	}
+
+	user := &User{}
+	if err := tx.GetContext(conn.ctx, user, "SELECT * FROM users WHERE id = ? FOR SHARE", ride.UserID); err != nil {
+		return
+	}
+
+	responseData := &chairGetNotificationResponseData{
+		RideID: ride.ID,
+		User: simpleUser{
+			ID:   user.ID,
+			Name: fmt.Sprintf("%s %s", user.Firstname, user.Lastname),
+		},
+		PickupCoordinate: Coordinate{
+			Latitude:  ride.PickupLatitude,
+			Longitude: ride.PickupLongitude,
+		},
+		DestinationCoordinate: Coordinate{
+			Latitude:  ride.DestinationLatitude,
+			Longitude: ride.DestinationLongitude,
+		},
+		Status: status.Status,
+	}
+
+	data, err := json.Marshal(responseData)
+	if err != nil {
+		return
+	}
+
+	_, err = tx.ExecContext(conn.ctx, `UPDATE ride_statuses SET chair_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, status.ID)
+	if err != nil {
+		return
+	}
+
+	sentCompleted := false
+	if status.Status == "COMPLETED" {
+		if ride.ChairID.Valid {
+			if _, err := tx.ExecContext(conn.ctx, `UPDATE chairs SET current_ride_id = NULL WHERE id = ?`, ride.ChairID.String); err != nil {
+				return
+			}
+			sentCompleted = true
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return
+	}
+
+	markChairStatusSent(rideID, status.ID)
+
+	if sentCompleted && ride.ChairID.Valid {
+		setChairCurrentRideID(ride.ChairID.String, "")
+	}
+
+	fmt.Fprintf(conn.w, "data:%s\n\n", data)
+	conn.flusher.Flush()
 }
