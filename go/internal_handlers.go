@@ -127,7 +127,7 @@ type ChairWithSpeed struct {
 func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// 待機中の全ライドを取得
+	// 待機中の全ライドを取得（古い順）
 	var rides []Ride
 	if err := db.SelectContext(ctx, &rides, `SELECT * FROM rides WHERE chair_id IS NULL ORDER BY created_at`); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -158,83 +158,58 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 最小費用流グラフを構築
-	// ノード: source(0), 椅子(1〜M), ライド(M+1〜M+N), sink(M+N+1)
-	numChairs := len(chairs)
-	numRides := len(rides)
-	numNodes := 2 + numChairs + numRides
-	source := 0
-	sink := numNodes - 1
-
-	mcf := NewMinCostFlow(numNodes)
-
-	// source → 各椅子 (容量1, コスト0)
-	for i := 0; i < numChairs; i++ {
-		chairNode := 1 + i
-		mcf.AddEdge(source, chairNode, 1, 0)
-	}
-
-	// 各椅子 → 各ライド (容量1, コスト = 到着時間 - 待ち時間ボーナス)
-	now := time.Now()
-	for i, chair := range chairs {
-		chairNode := 1 + i
-		chairLat := *chair.LatestLatitude
-		chairLon := *chair.LatestLongitude
-
-		for j, ride := range rides {
-			rideNode := 1 + numChairs + j
-
-			// マンハッタン距離を計算
-			distance := abs(chairLat-ride.PickupLatitude) + abs(chairLon-ride.PickupLongitude)
-
-			// 到着時間（距離/スピード）を1000倍してint64に変換
-			arrivalTime := int64(distance) * 1000 / int64(chair.Speed)
-
-			// 待ち時間ボーナス（待ち時間が長いほどコストを下げる）
-			waitSeconds := now.Sub(ride.CreatedAt).Seconds()
-			waitBonus := int64(waitSeconds * 100)
-
-			// コスト = 到着時間 - 待ち時間ボーナス
-			cost := arrivalTime - waitBonus
-
-			mcf.AddEdge(chairNode, rideNode, 1, cost)
-		}
-	}
-
-	// 各ライド → sink (容量1, コスト0)
-	for j := 0; j < numRides; j++ {
-		rideNode := 1 + numChairs + j
-		mcf.AddEdge(rideNode, sink, 1, 0)
-	}
-
-	// 最小費用流を実行
-	maxFlow := numChairs
-	if numRides < maxFlow {
-		maxFlow = numRides
-	}
-	mcf.Run(source, sink, maxFlow)
-
-	// マッチング結果を抽出（容量が0になった椅子→ライドのエッジを見つける）
+	// マッチング結果を格納
 	type Match struct {
-		ChairID string
-		RideID  string
-		UserID  string
+		ChairIdx int
+		ChairID  string
+		RideID   string
+		UserID   string
 	}
 	var matches []Match
 
-	for i := 0; i < numChairs; i++ {
-		chairNode := 1 + i
-		for _, edge := range mcf.graph[chairNode] {
-			// ライドノードへのエッジで、容量が0（使用済み）のものを探す
-			if edge.to >= 1+numChairs && edge.to < sink && edge.cap == 0 {
-				rideIdx := edge.to - 1 - numChairs
-				matches = append(matches, Match{
-					ChairID: chairs[i].ID,
-					RideID:  rides[rideIdx].ID,
-					UserID:  rides[rideIdx].UserID,
-				})
-				break
+	// 使用済み椅子を追跡
+	usedChairs := make([]bool, len(chairs))
+
+	// 各ライドに対して最適な椅子を割り当て（貪欲法）
+	now := time.Now()
+	for _, ride := range rides {
+		bestChairIdx := -1
+		bestScore := int64(math.MaxInt64)
+
+		// 待ち時間を計算
+		waitSeconds := now.Sub(ride.CreatedAt).Seconds()
+
+		for i, chair := range chairs {
+			if usedChairs[i] {
+				continue
 			}
+
+			// マンハッタン距離を計算
+			distance := abs(*chair.LatestLatitude-ride.PickupLatitude) + abs(*chair.LatestLongitude-ride.PickupLongitude)
+
+			// スコア = 到着時間（距離/スピード）
+			// 待ち時間が長い場合（25秒以上）は距離のみで判定
+			var score int64
+			if waitSeconds >= 25 {
+				score = int64(distance)
+			} else {
+				score = int64(distance) * 1000 / int64(chair.Speed)
+			}
+
+			if score < bestScore {
+				bestScore = score
+				bestChairIdx = i
+			}
+		}
+
+		if bestChairIdx >= 0 {
+			usedChairs[bestChairIdx] = true
+			matches = append(matches, Match{
+				ChairIdx: bestChairIdx,
+				ChairID:  chairs[bestChairIdx].ID,
+				RideID:   ride.ID,
+				UserID:   ride.UserID,
+			})
 		}
 	}
 
