@@ -65,6 +65,15 @@ func chairAuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		accessToken := c.Value
+
+		// キャッシュから取得を試みる
+		if chair, ok := getChairByAccessToken(accessToken); ok {
+			ctx = context.WithValue(ctx, "chair", chair)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		// キャッシュミス時のみDBアクセス
 		chair := &Chair{}
 		err = db.GetContext(ctx, chair, "SELECT * FROM chairs WHERE access_token = ?", accessToken)
 		if err != nil {
@@ -75,6 +84,9 @@ func chairAuthMiddleware(next http.Handler) http.Handler {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+
+		// キャッシュに追加
+		setChairCache(accessToken, chair)
 
 		ctx = context.WithValue(ctx, "chair", chair)
 		next.ServeHTTP(w, r.WithContext(ctx))

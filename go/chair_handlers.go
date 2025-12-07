@@ -47,6 +47,7 @@ func chairPostChairs(w http.ResponseWriter, r *http.Request) {
 	chairID := ulid.Make().String()
 	accessToken := secureRandomStr(32)
 
+	now := time.Now()
 	_, err := db.ExecContext(
 		ctx,
 		"INSERT INTO chairs (id, owner_id, name, model, is_active, access_token) VALUES (?, ?, ?, ?, ?, ?)",
@@ -56,6 +57,18 @@ func chairPostChairs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+
+	// 新規登録したChairをキャッシュに追加
+	setChairCache(accessToken, &Chair{
+		ID:          chairID,
+		OwnerID:     owner.ID,
+		Name:        req.Name,
+		Model:       req.Model,
+		IsActive:    false,
+		AccessToken: accessToken,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	})
 
 	http.SetCookie(w, &http.Cookie{
 		Path:  "/",

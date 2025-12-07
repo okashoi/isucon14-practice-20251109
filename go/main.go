@@ -43,6 +43,25 @@ var (
 	chairUnsentMutex    sync.RWMutex
 )
 
+// Chairキャッシュ (access_token -> *Chair)
+var (
+	chairCacheByAccessToken = make(map[string]*Chair)
+	chairCacheMutex         sync.RWMutex
+)
+
+func getChairByAccessToken(token string) (*Chair, bool) {
+	chairCacheMutex.RLock()
+	defer chairCacheMutex.RUnlock()
+	chair, ok := chairCacheByAccessToken[token]
+	return chair, ok
+}
+
+func setChairCache(token string, chair *Chair) {
+	chairCacheMutex.Lock()
+	defer chairCacheMutex.Unlock()
+	chairCacheByAccessToken[token] = chair
+}
+
 // INSERT後にキャッシュに追加
 func addUnsentStatus(rideID string, status RideStatus) {
 	appUnsentMutex.Lock()
@@ -246,6 +265,11 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	chairUnsentMutex.Lock()
 	chairUnsentStatuses = make(map[string][]RideStatus)
 	chairUnsentMutex.Unlock()
+
+	// Chairキャッシュをクリア
+	chairCacheMutex.Lock()
+	chairCacheByAccessToken = make(map[string]*Chair)
+	chairCacheMutex.Unlock()
 
 	go func() {
 		if _, err := http.Get("http://172.31.14.32:9000/api/group/collect"); err != nil {
