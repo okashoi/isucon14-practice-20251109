@@ -726,6 +726,7 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 各未送信状態を順次送信
+		rideStatusIDs := make([]string, 0, len(yetSentRideStatuses))
 		for _, rideStatus := range yetSentRideStatuses {
 			responseData := &appGetNotificationResponseData{
 				RideID: ride.ID,
@@ -753,8 +754,19 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "data:%s\n\n", data)
 			flusher.Flush()
 
-			// 送信済みマーク
-			_, err = tx.ExecContext(ctx, `UPDATE ride_statuses SET app_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, rideStatus.ID)
+			// IDを収集
+			rideStatusIDs = append(rideStatusIDs, rideStatus.ID)
+		}
+
+		// 送信済みマークを一括更新（N+1対策）
+		if len(rideStatusIDs) > 0 {
+			query, args, err := sqlx.In(`UPDATE ride_statuses SET app_sent_at = CURRENT_TIMESTAMP(6) WHERE id IN (?)`, rideStatusIDs)
+			if err != nil {
+				tx.Rollback()
+				return
+			}
+			query = tx.Rebind(query)
+			_, err = tx.ExecContext(ctx, query, args...)
 			if err != nil {
 				tx.Rollback()
 				return
