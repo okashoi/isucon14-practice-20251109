@@ -46,6 +46,7 @@ func runMatching(ctx context.Context, rideID string) {
 			ride.PickupLongitude, ride.PickupLongitude,
 		); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
+				matchingChan <- rideID
 				return
 			}
 			slog.Error("failed to get matched chair", "error", err)
@@ -71,6 +72,7 @@ func runMatching(ctx context.Context, rideID string) {
 			ride.PickupLongitude, ride.PickupLongitude,
 		); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
+				matchingChan <- rideID
 				return
 			}
 			slog.Error("failed to get matched chair", "error", err)
