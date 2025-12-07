@@ -6,19 +6,20 @@ import (
 )
 
 type Chair struct {
-	ID                      string     `db:"id"`
-	OwnerID                 string     `db:"owner_id"`
-	Name                    string     `db:"name"`
-	Model                   string     `db:"model"`
-	IsActive                bool       `db:"is_active"`
-	AccessToken             string     `db:"access_token"`
-	CreatedAt               time.Time  `db:"created_at"`
-	UpdatedAt               time.Time  `db:"updated_at"`
-	LatestLatitude          *int       `db:"latest_latitude"`
-	LatestLongitude         *int       `db:"latest_longitude"`
-	LatestLocationUpdatedAt *time.Time `db:"latest_location_updated_at"`
-	TotalDistance           int        `db:"total_distance"`
-	TotalDistanceUpdatedAt  *time.Time `db:"total_distance_updated_at"`
+	ID                      string         `db:"id"`
+	OwnerID                 string         `db:"owner_id"`
+	Name                    string         `db:"name"`
+	Model                   string         `db:"model"`
+	IsActive                bool           `db:"is_active"`
+	AccessToken             string         `db:"access_token"`
+	CreatedAt               time.Time      `db:"created_at"`
+	UpdatedAt               time.Time      `db:"updated_at"`
+	LatestLatitude          *int           `db:"latest_latitude"`
+	LatestLongitude         *int           `db:"latest_longitude"`
+	LatestLocationUpdatedAt *time.Time     `db:"latest_location_updated_at"`
+	TotalDistance           int            `db:"total_distance"`
+	TotalDistanceUpdatedAt  *time.Time     `db:"total_distance_updated_at"`
+	CurrentRideID           sql.NullString `db:"current_ride_id"`
 }
 
 type ChairModel struct {

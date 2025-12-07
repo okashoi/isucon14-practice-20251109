@@ -305,6 +305,14 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			sentStatusIDs = append(sentStatusIDs, rideStatus.ID)
+
+			// COMPLETEDステータスを椅子に通知した場合、current_ride_idをクリア
+			if rideStatus.Status == "COMPLETED" {
+				if _, err := tx.ExecContext(ctx, `UPDATE chairs SET current_ride_id = NULL WHERE id = ?`, chair.ID); err != nil {
+					tx.Rollback()
+					return
+				}
+			}
 		}
 
 		if err := tx.Commit(); err != nil {
