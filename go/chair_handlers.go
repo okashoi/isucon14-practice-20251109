@@ -57,6 +57,19 @@ func chairPostChairs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 作成したchairをキャッシュに保存
+	chair := &Chair{
+		ID:          chairID,
+		OwnerID:     owner.ID,
+		Name:        req.Name,
+		Model:       req.Model,
+		IsActive:    false,
+		AccessToken: accessToken,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+	}
+	chairCache.Store(accessToken, chair)
+
 	http.SetCookie(w, &http.Cookie{
 		Path:  "/",
 		Name:  "chair_session",

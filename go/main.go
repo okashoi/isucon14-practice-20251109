@@ -34,6 +34,9 @@ var (
 	chairLocationBufferMutex sync.Mutex
 )
 
+// chairs のオンメモリキャッシュ (access_token -> Chair)
+var chairCache sync.Map
+
 func main() {
 	mux := setup()
 	slog.Info("Listening on :8080")
@@ -172,6 +175,9 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	chairLocationBufferMutex.Lock()
 	chairLocationBuffer = []ChairLocation{}
 	chairLocationBufferMutex.Unlock()
+
+	// chairキャッシュをクリア
+	chairCache = sync.Map{}
 
 	go func() {
 		if _, err := http.Get("http://172.31.14.32:9000/api/group/collect"); err != nil {
