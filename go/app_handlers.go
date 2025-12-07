@@ -331,10 +331,12 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	rideStatusID := ulid.Make().String()
+	rideStatusCreatedAt := time.Now()
 	if _, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)`,
-		ulid.Make().String(), rideID, "MATCHING",
+		rideStatusID, rideID, "MATCHING",
 	); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -416,6 +418,14 @@ func appPostRides(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+
+	// コミット成功後にキャッシュに追加
+	addUnsentStatus(rideID, RideStatus{
+		ID:        rideStatusID,
+		RideID:    rideID,
+		Status:    "MATCHING",
+		CreatedAt: rideStatusCreatedAt,
+	})
 
 	writeJSON(w, http.StatusAccepted, &appPostRidesResponse{
 		RideID: rideID,
@@ -542,10 +552,12 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	completedStatusID := ulid.Make().String()
+	completedStatusCreatedAt := time.Now()
 	_, err = tx.ExecContext(
 		ctx,
 		`INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)`,
-		ulid.Make().String(), rideID, "COMPLETED")
+		completedStatusID, rideID, "COMPLETED")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -604,6 +616,14 @@ func appPostRideEvaluatation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+
+	// コミット成功後にキャッシュに追加
+	addUnsentStatus(rideID, RideStatus{
+		ID:        completedStatusID,
+		RideID:    rideID,
+		Status:    "COMPLETED",
+		CreatedAt: completedStatusCreatedAt,
+	})
 
 	writeJSON(w, http.StatusOK, &appPostRideEvaluationResponse{
 		CompletedAt: ride.UpdatedAt.UnixMilli(),
@@ -683,18 +703,17 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// 未送信の状態を取得
-		yetSentRideStatuses := []RideStatus{}
-		if err := tx.SelectContext(ctx, &yetSentRideStatuses, `SELECT * FROM ride_statuses WHERE ride_id = ? AND app_sent_at IS NULL ORDER BY created_at ASC`, ride.ID); err != nil {
-			tx.Rollback()
-			return
-		}
+		// 未送信の状態をキャッシュから取得
+		yetSentRideStatuses := getAppUnsentStatuses(ride.ID)
 
 		// 未送信の状態がない場合はスキップ
 		if len(yetSentRideStatuses) == 0 {
 			tx.Rollback()
 			return
 		}
+
+		// 送信済みステータスIDを追跡
+		sentStatusIDs := make([]string, 0, len(yetSentRideStatuses))
 
 		// 各未送信状態を順次送信
 		for _, rideStatus := range yetSentRideStatuses {
@@ -756,9 +775,17 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 				tx.Rollback()
 				return
 			}
+			sentStatusIDs = append(sentStatusIDs, rideStatus.ID)
 		}
 
-		tx.Commit()
+		if err := tx.Commit(); err != nil {
+			return
+		}
+
+		// コミット成功後にキャッシュから削除
+		for _, statusID := range sentStatusIDs {
+			markAppStatusSent(ride.ID, statusID)
+		}
 	}
 
 	// フォールバック用のticker (500ms間隔)
