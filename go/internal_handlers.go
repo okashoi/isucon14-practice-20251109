@@ -184,8 +184,8 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		rideNode := i + 1
 		// 待ち時間（秒）を計算
 		waitSeconds := now.Sub(ride.CreatedAt).Seconds()
-		// 待ち時間が長いほどコストを下げる係数（30秒ごとに半減）
-		waitFactor := 1.0 / (1.0 + waitSeconds/30.0)
+		// 待ち時間が長いほどコストを下げる係数（30秒で1/4に）
+		waitFactor := 1.0 / (1.0 + waitSeconds/10.0)
 
 		for j, chair := range chairs {
 			chairNode := n + 1 + j
