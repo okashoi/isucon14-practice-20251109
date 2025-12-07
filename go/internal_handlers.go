@@ -1,72 +1,148 @@
 package main
 
 import (
-	"database/sql"
-	"errors"
 	"net/http"
+	"strings"
 )
 
 // このAPIをインスタンス内から一定間隔で叩かせることで、椅子とライドをマッチングさせる
 func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	ride := &Ride{}
-	if err := db.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id IS NULL ORDER BY created_at LIMIT 1`); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			w.WriteHeader(http.StatusNoContent)
-			return
+
+	// マッチング待ちのライドをすべて取得
+	rides := []Ride{}
+	if err := db.SelectContext(ctx, &rides, `SELECT * FROM rides WHERE chair_id IS NULL ORDER BY created_at`); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if len(rides) == 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// 利用可能な椅子をすべて取得
+	availableChairs := []Chair{}
+	if err := db.SelectContext(ctx, &availableChairs, `
+		SELECT *
+		FROM chairs
+		WHERE is_active = TRUE
+		AND latest_latitude IS NOT NULL
+		AND latest_longitude IS NOT NULL
+		AND current_ride_id IS NULL
+	`); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if len(availableChairs) == 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// 椅子の利用可能状態を追跡するマップ
+	chairUsed := make(map[string]bool)
+
+	// マッチング結果を格納
+	type matchResult struct {
+		rideID  string
+		chairID string
+		userID  string
+	}
+	matches := []matchResult{}
+
+	// 各ライドに対して最も近い椅子をマッチング
+	for _, ride := range rides {
+		var bestChair *Chair
+		bestDistance := int(^uint(0) >> 1) // 最大int値
+
+		for i := range availableChairs {
+			chair := &availableChairs[i]
+			if chairUsed[chair.ID] {
+				continue
+			}
+
+			// マンハッタン距離を計算
+			distance := abs(*chair.LatestLatitude-ride.PickupLatitude) + abs(*chair.LatestLongitude-ride.PickupLongitude)
+			if distance < bestDistance {
+				bestDistance = distance
+				bestChair = chair
+			}
 		}
+
+		if bestChair != nil {
+			chairUsed[bestChair.ID] = true
+			matches = append(matches, matchResult{
+				rideID:  ride.ID,
+				chairID: bestChair.ID,
+				userID:  ride.UserID,
+			})
+		}
+	}
+
+	if len(matches) == 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// バルク更新: rides テーブル
+	// CASE文を使って一括更新
+	rideIDs := make([]string, len(matches))
+	for i, m := range matches {
+		rideIDs[i] = m.rideID
+	}
+
+	// rides テーブルの更新
+	rideUpdateQuery := "UPDATE rides SET chair_id = CASE id "
+	rideUpdateArgs := []interface{}{}
+	for _, m := range matches {
+		rideUpdateQuery += "WHEN ? THEN ? "
+		rideUpdateArgs = append(rideUpdateArgs, m.rideID, m.chairID)
+	}
+	rideUpdateQuery += "END WHERE id IN (?" + strings.Repeat(", ?", len(rideIDs)-1) + ")"
+	for _, id := range rideIDs {
+		rideUpdateArgs = append(rideUpdateArgs, id)
+	}
+
+	if _, err := db.ExecContext(ctx, rideUpdateQuery, rideUpdateArgs...); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
-	// pickup座標に近い空いている椅子を取得してアサイン
-	matched := &Chair{}
-	query := `
-		SELECT c.*
-		FROM chairs c
-		WHERE c.is_active = TRUE
-		AND c.latest_latitude IS NOT NULL
-		AND c.latest_longitude IS NOT NULL
-		AND c.current_ride_id IS NULL
-		ORDER BY 
-			(c.latest_latitude - ?) * (c.latest_latitude - ?) + 
-			(c.latest_longitude - ?) * (c.latest_longitude - ?)
-		LIMIT 1
-	`
-	if err := db.GetContext(ctx, matched, query,
-		ride.PickupLatitude, ride.PickupLatitude,
-		ride.PickupLongitude, ride.PickupLongitude,
-	); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err)
-		return
+	// chairs テーブルの更新
+	chairIDs := make([]string, len(matches))
+	for i, m := range matches {
+		chairIDs[i] = m.chairID
 	}
 
-	// 空いている椅子が見つかったのでアサイン
-	if _, err := db.ExecContext(ctx, "UPDATE rides SET chair_id = ? WHERE id = ?", matched.ID, ride.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+	chairUpdateQuery := "UPDATE chairs SET current_ride_id = CASE id "
+	chairUpdateArgs := []interface{}{}
+	for _, m := range matches {
+		chairUpdateQuery += "WHEN ? THEN ? "
+		chairUpdateArgs = append(chairUpdateArgs, m.chairID, m.rideID)
 	}
-	if _, err := db.ExecContext(ctx, "UPDATE chairs SET current_ride_id = ? WHERE id = ?", ride.ID, matched.ID); err != nil {
+	chairUpdateQuery += "END WHERE id IN (?" + strings.Repeat(", ?", len(chairIDs)-1) + ")"
+	for _, id := range chairIDs {
+		chairUpdateArgs = append(chairUpdateArgs, id)
+	}
+
+	if _, err := db.ExecContext(ctx, chairUpdateQuery, chairUpdateArgs...); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
 	// マッチング成立を即座に通知
 	notificationMutex.RLock()
-	if ch, ok := appNotificationChannels[ride.UserID]; ok {
-		select {
-		case ch <- struct{}{}:
-		default: // ブロッキング回避
+	for _, m := range matches {
+		if ch, ok := appNotificationChannels[m.userID]; ok {
+			select {
+			case ch <- struct{}{}:
+			default: // ブロッキング回避
+			}
 		}
-	}
-	if ch, ok := chairNotificationChannels[matched.ID]; ok {
-		select {
-		case ch <- struct{}{}:
-		default: // ブロッキング回避
+		if ch, ok := chairNotificationChannels[m.chairID]; ok {
+			select {
+			case ch <- struct{}{}:
+			default: // ブロッキング回避
+			}
 		}
 	}
 	notificationMutex.RUnlock()
