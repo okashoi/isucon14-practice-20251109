@@ -83,6 +83,14 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// トランザクション開始
+	tx, err := db.Beginx()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer tx.Rollback()
+
 	// バルク更新: rides テーブル
 	// CASE文を使って一括更新
 	rideIDs := make([]string, len(matches))
@@ -102,7 +110,7 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		rideUpdateArgs = append(rideUpdateArgs, id)
 	}
 
-	if _, err := db.ExecContext(ctx, rideUpdateQuery, rideUpdateArgs...); err != nil {
+	if _, err := tx.ExecContext(ctx, rideUpdateQuery, rideUpdateArgs...); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -124,7 +132,13 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		chairUpdateArgs = append(chairUpdateArgs, id)
 	}
 
-	if _, err := db.ExecContext(ctx, chairUpdateQuery, chairUpdateArgs...); err != nil {
+	if _, err := tx.ExecContext(ctx, chairUpdateQuery, chairUpdateArgs...); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	// トランザクションコミット
+	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
