@@ -27,18 +27,7 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		WHERE c.is_active = TRUE
 		AND c.latest_latitude IS NOT NULL
 		AND c.latest_longitude IS NOT NULL
-		AND NOT EXISTS (
-			SELECT 1
-			FROM rides r
-			WHERE r.chair_id = c.id
-			AND EXISTS (
-				SELECT 1
-				FROM ride_statuses rs
-				WHERE rs.ride_id = r.id
-				GROUP BY rs.ride_id
-				HAVING COUNT(rs.chair_sent_at) < 6
-			)
-		)
+		AND c.current_ride_id IS NULL
 		ORDER BY 
 			(c.latest_latitude - ?) * (c.latest_latitude - ?) + 
 			(c.latest_longitude - ?) * (c.latest_longitude - ?)
@@ -58,6 +47,10 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 
 	// 空いている椅子が見つかったのでアサイン
 	if _, err := db.ExecContext(ctx, "UPDATE rides SET chair_id = ? WHERE id = ?", matched.ID, ride.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if _, err := db.ExecContext(ctx, "UPDATE chairs SET current_ride_id = ? WHERE id = ?", ride.ID, matched.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
