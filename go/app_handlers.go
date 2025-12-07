@@ -696,14 +696,37 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// 各未送信状態を順次送信
-		for _, rideStatus := range yetSentRideStatuses {
-			fare, err := calculateDiscountedFare(ctx, tx, user.ID, ride, ride.PickupLatitude, ride.PickupLongitude, ride.DestinationLatitude, ride.DestinationLongitude)
+		// ループ外で一度だけ計算・取得（N+1対策）
+		fare, err := calculateDiscountedFare(ctx, tx, user.ID, ride, ride.PickupLatitude, ride.PickupLongitude, ride.DestinationLatitude, ride.DestinationLongitude)
+		if err != nil {
+			tx.Rollback()
+			return
+		}
+
+		var chairData *appGetNotificationResponseChair
+		if ride.ChairID.Valid {
+			chair := &Chair{}
+			if err := tx.GetContext(ctx, chair, `SELECT * FROM chairs WHERE id = ?`, ride.ChairID); err != nil {
+				tx.Rollback()
+				return
+			}
+
+			stats, err := getChairStats(ctx, tx, chair.ID)
 			if err != nil {
 				tx.Rollback()
 				return
 			}
 
+			chairData = &appGetNotificationResponseChair{
+				ID:    chair.ID,
+				Name:  chair.Name,
+				Model: chair.Model,
+				Stats: stats,
+			}
+		}
+
+		// 各未送信状態を順次送信
+		for _, rideStatus := range yetSentRideStatuses {
 			responseData := &appGetNotificationResponseData{
 				RideID: ride.ID,
 				PickupCoordinate: Coordinate{
@@ -716,29 +739,9 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 				},
 				Fare:      fare,
 				Status:    rideStatus.Status,
+				Chair:     chairData,
 				CreatedAt: ride.CreatedAt.UnixMilli(),
 				UpdateAt:  ride.UpdatedAt.UnixMilli(),
-			}
-
-			if ride.ChairID.Valid {
-				chair := &Chair{}
-				if err := tx.GetContext(ctx, chair, `SELECT * FROM chairs WHERE id = ?`, ride.ChairID); err != nil {
-					tx.Rollback()
-					return
-				}
-
-				stats, err := getChairStats(ctx, tx, chair.ID)
-				if err != nil {
-					tx.Rollback()
-					return
-				}
-
-				responseData.Chair = &appGetNotificationResponseChair{
-					ID:    chair.ID,
-					Name:  chair.Name,
-					Model: chair.Model,
-					Stats: stats,
-				}
 			}
 
 			// SSE形式で送信
