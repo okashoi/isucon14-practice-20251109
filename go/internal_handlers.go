@@ -16,7 +16,7 @@ func runMatching(ctx context.Context, rideID string) {
 	defer tx.Rollback()
 
 	ride := &Ride{}
-	if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE id = ? AND chair_id IS NULL`, rideID); err != nil {
+	if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE id = ? AND chair_id IS NULL FOR UPDATE SKIP LOCKED`, rideID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return
 		}
@@ -40,6 +40,7 @@ func runMatching(ctx context.Context, rideID string) {
 				(c.latest_latitude - ?) * (c.latest_latitude - ?) + 
 				(c.latest_longitude - ?) * (c.latest_longitude - ?)
 			LIMIT 1
+			FOR UPDATE SKIP LOCKED
 		`
 		if err := tx.GetContext(ctx, matched, query,
 			ride.PickupLatitude, ride.PickupLatitude,
@@ -66,6 +67,7 @@ func runMatching(ctx context.Context, rideID string) {
 				(c.latest_latitude - ?) * (c.latest_latitude - ?) + 
 				(c.latest_longitude - ?) * (c.latest_longitude - ?)
 			LIMIT 1
+			FOR UPDATE SKIP LOCKED
 		`
 		if err := tx.GetContext(ctx, matched, query,
 			ride.PickupLatitude, ride.PickupLatitude,
