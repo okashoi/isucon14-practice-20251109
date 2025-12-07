@@ -19,7 +19,7 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 
 	// マッチング待ちのライドをすべて取得
 	rides := []Ride{}
-	if err := tx.SelectContext(ctx, &rides, `SELECT * FROM rides WHERE chair_id IS NULL ORDER BY pickup_latitude`); err != nil {
+	if err := tx.SelectContext(ctx, &rides, `SELECT * FROM rides WHERE chair_id IS NULL ORDER BY created_at`); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -40,7 +40,6 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		AND c.latest_latitude IS NOT NULL
 		AND c.latest_longitude IS NOT NULL
 		AND c.current_ride_id IS NULL
-		ORDER BY c.latest_latitude
 	`); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -50,6 +49,9 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 椅子の利用可能状態を追跡するマップ
+	chairUsed := make(map[string]bool)
+
 	// マッチング結果を格納
 	type matchResult struct {
 		rideID  string
@@ -58,12 +60,33 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 	}
 	matches := []matchResult{}
 
-	for i := 0; i < min(len(rides), len(availableChairs)); i++ {
-		matches = append(matches, matchResult{
-			rideID:  rides[i].ID,
-			chairID: availableChairs[i].ID,
-			userID:  rides[i].UserID,
-		})
+	// 各ライドに対して最も近い椅子をマッチング
+	for _, ride := range rides {
+		var bestChair *Chair
+		bestDistance := int(^uint(0) >> 1) // 最大int値
+
+		for i := range availableChairs {
+			chair := availableChairs[i]
+			if chairUsed[chair.ID] {
+				continue
+			}
+
+			// マンハッタン距離を計算
+			distance := abs(*chair.LatestLatitude-ride.PickupLatitude) + abs(*chair.LatestLongitude-ride.PickupLongitude)
+			if distance < bestDistance {
+				bestDistance = distance
+				bestChair = &availableChairs[i]
+			}
+		}
+
+		if bestChair != nil {
+			chairUsed[bestChair.ID] = true
+			matches = append(matches, matchResult{
+				rideID:  ride.ID,
+				chairID: bestChair.ID,
+				userID:  ride.UserID,
+			})
+		}
 	}
 
 	if len(matches) == 0 {
