@@ -9,9 +9,17 @@ import (
 func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
+	// トランザクション開始
+	tx, err := db.Beginx()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer tx.Rollback()
+
 	// マッチング待ちのライドをすべて取得
 	rides := []Ride{}
-	if err := db.SelectContext(ctx, &rides, `SELECT * FROM rides WHERE chair_id IS NULL ORDER BY created_at`); err != nil {
+	if err := tx.SelectContext(ctx, &rides, `SELECT * FROM rides WHERE chair_id IS NULL ORDER BY created_at`); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -22,11 +30,11 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 
 	// 利用可能な椅子をすべて取得
 	availableChairs := []Chair{}
-	if err := db.SelectContext(ctx, &availableChairs, `
-		SELECT 
+	if err := tx.SelectContext(ctx, &availableChairs, `
+		SELECT
 		    c.id,
 		    c.latest_latitude,
-		    c.latest_longitude,
+		    c.latest_longitude
 		FROM chairs c
 		WHERE c.is_active = TRUE
 		AND c.latest_latitude IS NOT NULL
@@ -86,14 +94,6 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// トランザクション開始
-	tx, err := db.Beginx()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	defer tx.Rollback()
-
 	// バルク更新: rides テーブル
 	// CASE文を使って一括更新
 	rideIDs := make([]string, len(matches))
@@ -140,12 +140,6 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// トランザクションコミット
-	if err := tx.Commit(); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
 	// マッチング成立を即座に通知
 	notificationMutex.RLock()
 	for _, m := range matches {
@@ -163,6 +157,12 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	notificationMutex.RUnlock()
+
+	// トランザクションコミット
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
