@@ -130,6 +130,11 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback()
 
 	ride := &Ride{}
+	var insertedStatusID string
+	var insertedStatusName string
+	var insertedRideID string
+	insertedStatusCreatedAt := time.Now()
+
 	if err := tx.GetContext(ctx, ride, `SELECT *, latest_status FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusInternalServerError, err)
@@ -142,14 +147,20 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		}
 		if status != "COMPLETED" && status != "CANCELED" {
 			if req.Latitude == ride.PickupLatitude && req.Longitude == ride.PickupLongitude && status == "ENROUTE" {
-				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "PICKUP"); err != nil {
+				insertedStatusID = ulid.Make().String()
+				insertedStatusName = "PICKUP"
+				insertedRideID = ride.ID
+				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", insertedStatusID, ride.ID, "PICKUP"); err != nil {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
 			}
 
 			if req.Latitude == ride.DestinationLatitude && req.Longitude == ride.DestinationLongitude && status == "CARRYING" {
-				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "ARRIVED"); err != nil {
+				insertedStatusID = ulid.Make().String()
+				insertedStatusName = "ARRIVED"
+				insertedRideID = ride.ID
+				if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", insertedStatusID, ride.ID, "ARRIVED"); err != nil {
 					writeError(w, http.StatusInternalServerError, err)
 					return
 				}
@@ -160,6 +171,16 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+
+	// コミット成功後にキャッシュに追加
+	if insertedStatusID != "" {
+		addUnsentStatus(insertedRideID, RideStatus{
+			ID:        insertedStatusID,
+			RideID:    insertedRideID,
+			Status:    insertedStatusName,
+			CreatedAt: insertedStatusCreatedAt,
+		})
 	}
 
 	writeJSON(w, http.StatusOK, &chairPostCoordinateResponse{
@@ -230,12 +251,8 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// 未送信の状態を取得
-		yetSentRideStatuses := []RideStatus{}
-		if err := tx.SelectContext(ctx, &yetSentRideStatuses, `SELECT * FROM ride_statuses WHERE ride_id = ? AND chair_sent_at IS NULL ORDER BY created_at ASC`, ride.ID); err != nil {
-			tx.Rollback()
-			return
-		}
+		// 未送信の状態をキャッシュから取得
+		yetSentRideStatuses := getChairUnsentStatuses(ride.ID)
 
 		// 未送信の状態がない場合はスキップ
 		if len(yetSentRideStatuses) == 0 {
@@ -249,6 +266,9 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 			tx.Rollback()
 			return
 		}
+
+		// 送信済みステータスIDを追跡
+		sentStatusIDs := make([]string, 0, len(yetSentRideStatuses))
 
 		// 各未送信状態を順次送信
 		for _, rideStatus := range yetSentRideStatuses {
@@ -284,9 +304,17 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 				tx.Rollback()
 				return
 			}
+			sentStatusIDs = append(sentStatusIDs, rideStatus.ID)
 		}
 
-		tx.Commit()
+		if err := tx.Commit(); err != nil {
+			return
+		}
+
+		// コミット成功後にキャッシュから削除
+		for _, statusID := range sentStatusIDs {
+			markChairStatusSent(ride.ID, statusID)
+		}
 	}
 
 	// フォールバック用のticker (500ms間隔)
@@ -345,10 +373,16 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var statusID string
+	var statusName string
+	statusCreatedAt := time.Now()
+
 	switch req.Status {
 	// Acknowledge the ride
 	case "ENROUTE":
-		if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "ENROUTE"); err != nil {
+		statusID = ulid.Make().String()
+		statusName = "ENROUTE"
+		if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", statusID, ride.ID, "ENROUTE"); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -362,18 +396,29 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, errors.New("chair has not arrived yet"))
 			return
 		}
-		if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", ulid.Make().String(), ride.ID, "CARRYING"); err != nil {
+		statusID = ulid.Make().String()
+		statusName = "CARRYING"
+		if _, err := tx.ExecContext(ctx, "INSERT INTO ride_statuses (id, ride_id, status) VALUES (?, ?, ?)", statusID, ride.ID, "CARRYING"); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
 	default:
 		writeError(w, http.StatusBadRequest, errors.New("invalid status"))
+		return
 	}
 
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+
+	// コミット成功後にキャッシュに追加
+	addUnsentStatus(ride.ID, RideStatus{
+		ID:        statusID,
+		RideID:    ride.ID,
+		Status:    statusName,
+		CreatedAt: statusCreatedAt,
+	})
 
 	w.WriteHeader(http.StatusNoContent)
 }
