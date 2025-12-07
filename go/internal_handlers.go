@@ -8,8 +8,15 @@ import (
 )
 
 func runMatching(ctx context.Context, rideID string) {
+	tx, err := db.Beginx()
+	if err != nil {
+		slog.Error("failed to begin transaction", "error", err)
+		return
+	}
+	defer tx.Rollback()
+
 	ride := &Ride{}
-	if err := db.GetContext(ctx, ride, `SELECT * FROM rides WHERE id = ? AND chair_id IS NULL`, rideID); err != nil {
+	if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE id = ? AND chair_id IS NULL`, rideID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return
 		}
@@ -34,7 +41,7 @@ func runMatching(ctx context.Context, rideID string) {
 				(c.latest_longitude - ?) * (c.latest_longitude - ?)
 			LIMIT 1
 		`
-		if err := db.GetContext(ctx, matched, query,
+		if err := tx.GetContext(ctx, matched, query,
 			ride.PickupLatitude, ride.PickupLatitude,
 			ride.PickupLongitude, ride.PickupLongitude,
 		); err != nil {
@@ -59,7 +66,7 @@ func runMatching(ctx context.Context, rideID string) {
 				(c.latest_longitude - ?) * (c.latest_longitude - ?)
 			LIMIT 1
 		`
-		if err := db.GetContext(ctx, matched, query,
+		if err := tx.GetContext(ctx, matched, query,
 			ride.PickupLatitude, ride.PickupLatitude,
 			ride.PickupLongitude, ride.PickupLongitude,
 		); err != nil {
@@ -71,12 +78,17 @@ func runMatching(ctx context.Context, rideID string) {
 		}
 	}
 
-	if _, err := db.ExecContext(ctx, "UPDATE rides SET chair_id = ? WHERE id = ?", matched.ID, ride.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, "UPDATE rides SET chair_id = ? WHERE id = ?", matched.ID, ride.ID); err != nil {
 		slog.Error("failed to update ride with chair_id", "error", err)
 		return
 	}
-	if _, err := db.ExecContext(ctx, "UPDATE chairs SET current_ride_id = ? WHERE id = ?", ride.ID, matched.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, "UPDATE chairs SET current_ride_id = ? WHERE id = ?", ride.ID, matched.ID); err != nil {
 		slog.Error("failed to update chair with current_ride_id", "error", err)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		slog.Error("failed to commit transaction", "error", err)
 		return
 	}
 
