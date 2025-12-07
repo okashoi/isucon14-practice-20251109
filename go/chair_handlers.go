@@ -338,8 +338,8 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// フォールバック用のticker (500ms間隔)
-	ticker := time.NewTicker(500 * time.Millisecond)
+	// フォールバック用のticker (400ms間隔)
+	ticker := time.NewTicker(400 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
