@@ -788,8 +788,8 @@ func appGetNotification(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// フォールバック用のticker (100ms間隔)
-	ticker := time.NewTicker(100 * time.Millisecond)
+	// フォールバック用のticker (250ms間隔)
+	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
