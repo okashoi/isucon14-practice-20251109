@@ -300,7 +300,10 @@ func setup() http.Handler {
 	// chair_locations のバルクインサート用goroutineを起動
 	go bulkInsertChairLocations()
 
-	go matchingWorker()
+	// マッチングワーカーを3並列で起動
+	for i := 0; i < 3; i++ {
+		go matchingWorker()
+	}
 
 	return mux
 }
