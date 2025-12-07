@@ -137,23 +137,37 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		distance = abs(req.Latitude-prevLocation.Latitude) + abs(req.Longitude-prevLocation.Longitude)
 	}
 
-	// chairsテーブルの更新をバッファに追加（バッチ処理で実行）
-	chairUpdateBufferMutex.Lock()
-	if existing, ok := chairUpdateBuffer[chair.ID]; ok {
-		// 既存エントリがある場合は位置を上書き、距離は累積
-		existing.LatestLatitude = req.Latitude
-		existing.LatestLongitude = req.Longitude
-		existing.LatestLocationUpdatedAt = now
-		existing.DistanceToAdd += distance
-	} else {
-		chairUpdateBuffer[chair.ID] = &ChairUpdateData{
-			LatestLatitude:          req.Latitude,
-			LatestLongitude:         req.Longitude,
-			LatestLocationUpdatedAt: now,
-			DistanceToAdd:           distance,
+	// 最初の位置報告（prevLocation == nil）は即時UPDATEしてマッチング対象にする
+	// それ以降はバッファリングしてバッチ処理
+	if prevLocation == nil {
+		if _, err := db.ExecContext(ctx, `UPDATE chairs SET 
+			latest_latitude = ?, 
+			latest_longitude = ?, 
+			latest_location_updated_at = ?,
+			total_distance = total_distance + ?
+		WHERE id = ?`, req.Latitude, req.Longitude, now, distance, chair.ID); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
 		}
+	} else {
+		// chairsテーブルの更新をバッファに追加（バッチ処理で実行）
+		chairUpdateBufferMutex.Lock()
+		if existing, ok := chairUpdateBuffer[chair.ID]; ok {
+			// 既存エントリがある場合は位置を上書き、距離は累積
+			existing.LatestLatitude = req.Latitude
+			existing.LatestLongitude = req.Longitude
+			existing.LatestLocationUpdatedAt = now
+			existing.DistanceToAdd += distance
+		} else {
+			chairUpdateBuffer[chair.ID] = &ChairUpdateData{
+				LatestLatitude:          req.Latitude,
+				LatestLongitude:         req.Longitude,
+				LatestLocationUpdatedAt: now,
+				DistanceToAdd:           distance,
+			}
+		}
+		chairUpdateBufferMutex.Unlock()
 	}
-	chairUpdateBufferMutex.Unlock()
 
 	// メモリキャッシュを更新
 	setChairLatestLocation(chair.ID, &location)
