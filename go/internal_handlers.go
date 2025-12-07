@@ -122,7 +122,7 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// 1回のマッチングで処理する最大ライド数
-	const maxMatchingPerCall = 3
+	const maxMatchingPerCall = 10
 
 	// 1. 未マッチライドを取得（上限付き）
 	rides := []Ride{}
