@@ -55,7 +55,7 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		bestDistance := int(^uint(0) >> 1) // 最大int値
 
 		for i := range availableChairs {
-			chair := &availableChairs[i]
+			chair := availableChairs[i]
 			if chairUsed[chair.ID] {
 				continue
 			}
@@ -64,7 +64,7 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 			distance := abs(*chair.LatestLatitude-ride.PickupLatitude) + abs(*chair.LatestLongitude-ride.PickupLongitude)
 			if distance < bestDistance {
 				bestDistance = distance
-				bestChair = chair
+				bestChair = &chair
 			}
 		}
 
