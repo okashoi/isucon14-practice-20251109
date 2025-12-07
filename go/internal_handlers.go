@@ -26,14 +26,15 @@ func matchingAroundOrigin(ctx context.Context) {
 	query := `
 		SELECT c.*
 		FROM chairs c
+		INNER JOIN chair_models cm ON c.model = cm.name
 		WHERE c.is_active = TRUE
 		AND c.latest_latitude IS NOT NULL
 		AND c.latest_latitude <= 150
 		AND c.latest_longitude IS NOT NULL
 		AND c.current_ride_id IS NULL
 		ORDER BY 
-			(c.latest_latitude - ?) * (c.latest_latitude - ?) + 
-			(c.latest_longitude - ?) * (c.latest_longitude - ?)
+			((c.latest_latitude - ?) * (c.latest_latitude - ?) + 
+			(c.latest_longitude - ?) * (c.latest_longitude - ?)) / cm.speed
 		LIMIT 1
 	`
 	if err := db.GetContext(ctx, matched, query,
