@@ -25,7 +25,7 @@ var db *sqlx.DB
 // 通知チャネル管理
 var (
 	appNotificationChannels   = make(map[string]chan *appGetNotificationResponseData)
-	chairNotificationChannels = make(map[string]chan *chairGetNotificationResponseData)
+	chairNotificationChannels = make(map[string]chan struct{})
 	notificationMutex         sync.RWMutex
 )
 
@@ -34,6 +34,42 @@ var (
 	chairLocationBuffer      = []ChairLocation{}
 	chairLocationBufferMutex sync.Mutex
 )
+
+// 未送信ステータスのキャッシュ (chair用のみ)
+var (
+	chairUnsentStatuses = make(map[string][]RideStatus)
+	chairUnsentMutex    sync.RWMutex
+)
+
+// chair用: 未送信ステータス取得（SELECTの代わり）
+func getChairUnsentStatuses(rideID string) []RideStatus {
+	chairUnsentMutex.RLock()
+	defer chairUnsentMutex.RUnlock()
+	// コピーを返す（スライス共有を避ける）
+	result := make([]RideStatus, len(chairUnsentStatuses[rideID]))
+	copy(result, chairUnsentStatuses[rideID])
+	return result
+}
+
+// chair用: 送信済みマーク後にキャッシュから削除
+func markChairStatusSent(rideID, statusID string) {
+	chairUnsentMutex.Lock()
+	defer chairUnsentMutex.Unlock()
+	statuses := chairUnsentStatuses[rideID]
+	for i, s := range statuses {
+		if s.ID == statusID {
+			chairUnsentStatuses[rideID] = append(statuses[:i], statuses[i+1:]...)
+			break
+		}
+	}
+}
+
+// chair用: キャッシュに追加
+func addChairUnsentStatus(rideID string, status RideStatus) {
+	chairUnsentMutex.Lock()
+	chairUnsentStatuses[rideID] = append(chairUnsentStatuses[rideID], status)
+	chairUnsentMutex.Unlock()
+}
 
 func main() {
 	mux := setup()
@@ -166,13 +202,18 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	// 通知チャネルをクリア
 	notificationMutex.Lock()
 	appNotificationChannels = make(map[string]chan *appGetNotificationResponseData)
-	chairNotificationChannels = make(map[string]chan *chairGetNotificationResponseData)
+	chairNotificationChannels = make(map[string]chan struct{})
 	notificationMutex.Unlock()
 
 	// chair_locationsバッファをクリア
 	chairLocationBufferMutex.Lock()
 	chairLocationBuffer = []ChairLocation{}
 	chairLocationBufferMutex.Unlock()
+
+	// 未送信ステータスキャッシュをクリア（chair用）
+	chairUnsentMutex.Lock()
+	chairUnsentStatuses = make(map[string][]RideStatus)
+	chairUnsentMutex.Unlock()
 
 	go func() {
 		if _, err := http.Get("http://172.31.14.32:9000/api/group/collect"); err != nil {

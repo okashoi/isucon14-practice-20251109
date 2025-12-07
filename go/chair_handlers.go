@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -11,80 +10,6 @@ import (
 
 	"github.com/oklog/ulid/v2"
 )
-
-// chair用通知送信関数（goroutineで非同期実行）
-func sendChairNotification(rideID, statusID, status string) {
-	go func() {
-		ctx := context.Background()
-		tx, err := db.Beginx()
-		if err != nil {
-			return
-		}
-		defer tx.Rollback()
-
-		ride := &Ride{}
-		if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE id = ?`, rideID); err != nil {
-			return
-		}
-
-		user := &User{}
-		if err := tx.GetContext(ctx, user, `SELECT * FROM users WHERE id = ?`, ride.UserID); err != nil {
-			return
-		}
-
-		responseData := &chairGetNotificationResponseData{
-			RideID: ride.ID,
-			User: simpleUser{
-				ID:   user.ID,
-				Name: fmt.Sprintf("%s %s", user.Firstname, user.Lastname),
-			},
-			PickupCoordinate: Coordinate{
-				Latitude:  ride.PickupLatitude,
-				Longitude: ride.PickupLongitude,
-			},
-			DestinationCoordinate: Coordinate{
-				Latitude:  ride.DestinationLatitude,
-				Longitude: ride.DestinationLongitude,
-			},
-			Status: status,
-		}
-
-		// 送信済みマーク
-		if _, err := tx.ExecContext(ctx, `UPDATE ride_statuses SET chair_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, statusID); err != nil {
-			return
-		}
-
-		chair := &Chair{}
-		if !ride.ChairID.Valid {
-			return
-		}
-		if err := tx.GetContext(ctx, chair, `SELECT * FROM chairs WHERE id = ?`, ride.ChairID.String); err != nil {
-			return
-		}
-
-		// COMPLETEDステータスの場合、current_ride_idをクリア
-		if status == "COMPLETED" {
-			if _, err := tx.ExecContext(ctx, `UPDATE chairs SET current_ride_id = NULL WHERE id = ?`, chair.ID); err != nil {
-				return
-			}
-		}
-
-		if err := tx.Commit(); err != nil {
-			return
-		}
-
-		// チャネルに送信
-
-		notificationMutex.RLock()
-		if ch, ok := chairNotificationChannels[chair.ID]; ok {
-			select {
-			case ch <- responseData:
-			default: // ブロッキング回避
-			}
-		}
-		notificationMutex.RUnlock()
-	}()
-}
 
 type chairPostChairsRequest struct {
 	Name               string `json:"name"`
@@ -247,9 +172,23 @@ func chairPostCoordinate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// コミット成功後に通知送信
+	// コミット成功後にキャッシュに追加
 	if insertedStatusID != "" {
-		sendChairNotification(insertedRideID, insertedStatusID, insertedStatusName)
+		addChairUnsentStatus(insertedRideID, RideStatus{
+			ID:        insertedStatusID,
+			RideID:    insertedRideID,
+			Status:    insertedStatusName,
+			CreatedAt: time.Now(),
+		})
+		// 通知チャネルにシグナル送信
+		notificationMutex.RLock()
+		if ch, ok := chairNotificationChannels[chair.ID]; ok {
+			select {
+			case ch <- struct{}{}:
+			default: // ブロッキング回避
+			}
+		}
+		notificationMutex.RUnlock()
 	}
 
 	writeJSON(w, http.StatusOK, &chairPostCoordinateResponse{
@@ -292,7 +231,7 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// チャネル登録
-	notifyChan := make(chan *chairGetNotificationResponseData, 10)
+	notifyChan := make(chan struct{}, 10)
 	notificationMutex.Lock()
 	chairNotificationChannels[chair.ID] = notifyChan
 	notificationMutex.Unlock()
@@ -304,21 +243,110 @@ func chairGetNotification(w http.ResponseWriter, r *http.Request) {
 		close(notifyChan)
 	}()
 
+	// 未送信の状態遷移を全て送信する関数
+	sendNotifications := func() {
+		tx, err := db.Beginx()
+		if err != nil {
+			return
+		}
+
+		ride := &Ride{}
+		if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE chair_id = ? ORDER BY updated_at DESC LIMIT 1`, chair.ID); err != nil {
+			tx.Rollback()
+			if errors.Is(err, sql.ErrNoRows) {
+				return
+			}
+			return
+		}
+
+		// 未送信の状態をキャッシュから取得
+		yetSentRideStatuses := getChairUnsentStatuses(ride.ID)
+
+		// 未送信の状態がない場合はスキップ
+		if len(yetSentRideStatuses) == 0 {
+			tx.Rollback()
+			return
+		}
+
+		user := &User{}
+		err = tx.GetContext(ctx, user, "SELECT * FROM users WHERE id = ? FOR SHARE", ride.UserID)
+		if err != nil {
+			tx.Rollback()
+			return
+		}
+
+		// 送信済みステータスIDを追跡
+		sentStatusIDs := make([]string, 0, len(yetSentRideStatuses))
+
+		// 各未送信状態を順次送信
+		for _, rideStatus := range yetSentRideStatuses {
+			responseData := &chairGetNotificationResponseData{
+				RideID: ride.ID,
+				User: simpleUser{
+					ID:   user.ID,
+					Name: fmt.Sprintf("%s %s", user.Firstname, user.Lastname),
+				},
+				PickupCoordinate: Coordinate{
+					Latitude:  ride.PickupLatitude,
+					Longitude: ride.PickupLongitude,
+				},
+				DestinationCoordinate: Coordinate{
+					Latitude:  ride.DestinationLatitude,
+					Longitude: ride.DestinationLongitude,
+				},
+				Status: rideStatus.Status,
+			}
+
+			// SSE形式で送信
+			data, err := json.Marshal(responseData)
+			if err != nil {
+				tx.Rollback()
+				return
+			}
+			fmt.Fprintf(w, "data:%s\n\n", data)
+			flusher.Flush()
+
+			// 送信済みマーク
+			_, err = tx.ExecContext(ctx, `UPDATE ride_statuses SET chair_sent_at = CURRENT_TIMESTAMP(6) WHERE id = ?`, rideStatus.ID)
+			if err != nil {
+				tx.Rollback()
+				return
+			}
+			sentStatusIDs = append(sentStatusIDs, rideStatus.ID)
+
+			// COMPLETEDステータスを椅子に通知した場合、current_ride_idをクリア
+			if rideStatus.Status == "COMPLETED" {
+				if _, err := tx.ExecContext(ctx, `UPDATE chairs SET current_ride_id = NULL WHERE id = ?`, chair.ID); err != nil {
+					tx.Rollback()
+					return
+				}
+			}
+		}
+
+		if err := tx.Commit(); err != nil {
+			return
+		}
+
+		// コミット成功後にキャッシュから削除
+		for _, statusID := range sentStatusIDs {
+			markChairStatusSent(ride.ID, statusID)
+		}
+	}
+
+	// フォールバック用のticker (500ms間隔)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case responseData := <-notifyChan:
-			if responseData == nil {
-				continue
-			}
-			// SSE形式で送信
-			data, err := json.Marshal(responseData)
-			if err != nil {
-				continue
-			}
-			fmt.Fprintf(w, "data:%s\n\n", data)
-			flusher.Flush()
+		case <-notifyChan:
+			// マッチング成立時に即座に通知
+			sendNotifications()
+		case <-ticker.C:
+			// フォールバック: 定期的にもチェック
+			sendNotifications()
 		}
 	}
 }
@@ -399,8 +427,22 @@ func chairPostRideStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// コミット成功後に通知送信
-	sendChairNotification(ride.ID, statusID, statusName)
+	// コミット成功後にキャッシュに追加
+	addChairUnsentStatus(ride.ID, RideStatus{
+		ID:        statusID,
+		RideID:    ride.ID,
+		Status:    statusName,
+		CreatedAt: time.Now(),
+	})
+	// 通知チャネルにシグナル送信
+	notificationMutex.RLock()
+	if ch, ok := chairNotificationChannels[chair.ID]; ok {
+		select {
+		case ch <- struct{}{}:
+		default: // ブロッキング回避
+		}
+	}
+	notificationMutex.RUnlock()
 
 	w.WriteHeader(http.StatusNoContent)
 }
