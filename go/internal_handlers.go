@@ -121,8 +121,8 @@ func (mcf *MinCostFlow) Run(source, sink, maxFlow int) MinCostFlowResult {
 func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// 1回のマッチングで処理する最大ライド数（空き椅子を維持するため制限）
-	const maxMatchingPerCall = 10
+	// 1回のマッチングで処理する最大ライド数
+	const maxMatchingPerCall = 1
 
 	// 1. 未マッチライドを取得（上限付き）
 	rides := []Ride{}
