@@ -49,6 +49,12 @@ var (
 	chairCacheMutex         sync.RWMutex
 )
 
+// 椅子のcurrent_ride_idキャッシュ (chair_id -> ride_id)
+var (
+	chairCurrentRideCache      = make(map[string]string) // 空文字列 = NULLを表す
+	chairCurrentRideCacheMutex sync.RWMutex
+)
+
 func getChairByAccessToken(token string) (*Chair, bool) {
 	chairCacheMutex.RLock()
 	defer chairCacheMutex.RUnlock()
@@ -60,6 +66,21 @@ func setChairCache(token string, chair *Chair) {
 	chairCacheMutex.Lock()
 	defer chairCacheMutex.Unlock()
 	chairCacheByAccessToken[token] = chair
+}
+
+// 椅子のcurrent_ride_idを取得（存在しない場合は空文字列を返す）
+func getChairCurrentRideID(chairID string) (string, bool) {
+	chairCurrentRideCacheMutex.RLock()
+	defer chairCurrentRideCacheMutex.RUnlock()
+	rideID, ok := chairCurrentRideCache[chairID]
+	return rideID, ok
+}
+
+// 椅子のcurrent_ride_idを設定（空文字列でNULLを表す）
+func setChairCurrentRideID(chairID string, rideID string) {
+	chairCurrentRideCacheMutex.Lock()
+	defer chairCurrentRideCacheMutex.Unlock()
+	chairCurrentRideCache[chairID] = rideID
 }
 
 // INSERT後にキャッシュに追加
@@ -270,6 +291,11 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	chairCacheMutex.Lock()
 	chairCacheByAccessToken = make(map[string]*Chair)
 	chairCacheMutex.Unlock()
+
+	// chairCurrentRideCacheをクリア
+	chairCurrentRideCacheMutex.Lock()
+	chairCurrentRideCache = make(map[string]string)
+	chairCurrentRideCacheMutex.Unlock()
 
 	go func() {
 		if _, err := http.Get("http://172.31.14.32:9000/api/group/collect"); err != nil {

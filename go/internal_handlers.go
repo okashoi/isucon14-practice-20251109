@@ -55,6 +55,9 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// キャッシュを更新
+	setChairCurrentRideID(matched.ID, ride.ID)
+
 	// マッチング成立を即座に通知
 	notificationMutex.RLock()
 	if ch, ok := appNotificationChannels[ride.UserID]; ok {
