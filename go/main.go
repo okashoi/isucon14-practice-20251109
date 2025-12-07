@@ -174,7 +174,7 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	chairLocationBufferMutex.Unlock()
 
 	go func() {
-		if _, err := http.Get("http://54.238.146.225:9000/api/group/collect"); err != nil {
+		if _, err := http.Get("http://172.31.14.32:9000/api/group/collect"); err != nil {
 			//log.Printf("failed to communicate with pprotein: %v", err)
 		}
 	}()
