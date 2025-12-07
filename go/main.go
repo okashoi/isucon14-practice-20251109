@@ -464,6 +464,8 @@ func insertChairLocationsBulk(locations []ChairLocation) {
 func matchingWorker() {
 	ctx := context.Background()
 	for rideID := range matchingChan {
-		runMatching(ctx, rideID)
+		if err := runMatching(ctx, rideID); err != nil {
+			matchingChan <- rideID
+		}
 	}
 }

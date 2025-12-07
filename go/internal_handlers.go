@@ -7,21 +7,21 @@ import (
 	"log/slog"
 )
 
-func runMatching(ctx context.Context, rideID string) {
+func runMatching(ctx context.Context, rideID string) error {
 	tx, err := db.Beginx()
 	if err != nil {
 		slog.Error("failed to begin transaction", "error", err)
-		return
+		return err
 	}
 	defer tx.Rollback()
 
 	ride := &Ride{}
 	if err := tx.GetContext(ctx, ride, `SELECT * FROM rides WHERE id = ? AND chair_id IS NULL FOR UPDATE SKIP LOCKED`, rideID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return
+			return nil
 		}
 		slog.Error("failed to get ride for matching", "error", err, "ride_id", rideID)
-		return
+		return err
 	}
 
 	// pickup_latitudeに応じて適切なchairを検索
@@ -46,12 +46,7 @@ func runMatching(ctx context.Context, rideID string) {
 			ride.PickupLatitude, ride.PickupLatitude,
 			ride.PickupLongitude, ride.PickupLongitude,
 		); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				matchingChan <- rideID
-				return
-			}
-			slog.Error("failed to get matched chair", "error", err)
-			return
+			return err
 		}
 	} else {
 		matched = &Chair{}
@@ -73,27 +68,22 @@ func runMatching(ctx context.Context, rideID string) {
 			ride.PickupLatitude, ride.PickupLatitude,
 			ride.PickupLongitude, ride.PickupLongitude,
 		); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				matchingChan <- rideID
-				return
-			}
-			slog.Error("failed to get matched chair", "error", err)
-			return
+			return err
 		}
 	}
 
 	if _, err := tx.ExecContext(ctx, "UPDATE rides SET chair_id = ? WHERE id = ?", matched.ID, ride.ID); err != nil {
 		slog.Error("failed to update ride with chair_id", "error", err)
-		return
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE chairs SET current_ride_id = ? WHERE id = ?", ride.ID, matched.ID); err != nil {
 		slog.Error("failed to update chair with current_ride_id", "error", err)
-		return
+		return err
 	}
 
 	if err := tx.Commit(); err != nil {
 		slog.Error("failed to commit transaction", "error", err)
-		return
+		return err
 	}
 
 	setChairCurrentRideID(matched.ID, ride.ID)
@@ -112,4 +102,6 @@ func runMatching(ctx context.Context, rideID string) {
 		}
 	}
 	notificationMutex.RUnlock()
+
+	return nil
 }
