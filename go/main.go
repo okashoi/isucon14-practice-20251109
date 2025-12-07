@@ -37,7 +37,6 @@ var (
 	chairLocationBufferMutex sync.Mutex
 )
 
-
 // chairs更新用バッファ
 type ChairUpdateData struct {
 	LatestLatitude          int
@@ -49,7 +48,7 @@ type ChairUpdateData struct {
 var (
 	chairUpdateBuffer      = make(map[string]*ChairUpdateData)
 	chairUpdateBufferMutex sync.Mutex
-	matchingChan = make(chan struct{}, 1000)
+	matchingChan           = make(chan struct{}, 1000)
 )
 
 // 未送信ステータスのキャッシュ (ride_id -> []RideStatus)
@@ -311,7 +310,6 @@ func setup() http.Handler {
 	// chair_locations のバルクインサート用goroutineを起動
 	go bulkInsertChairLocations()
 
-
 	// chairs テーブルのバルク更新用goroutineを起動
 	go bulkUpdateChairs()
 
@@ -563,6 +561,8 @@ func updateChairsBulk(updates map[string]*ChairUpdateData) {
 	_, err := db.Exec(query, args...)
 	if err != nil {
 		slog.Error("bulk update chairs failed", "error", err, "count", len(updates))
+	}
+}
 
 func matchingWorker() {
 	ctx := context.Background()
