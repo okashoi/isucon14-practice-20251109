@@ -136,8 +136,9 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. 全ての利用可能な椅子を取得（アクティブかつ進行中のライドがない椅子）
+	// 2. 利用可能な椅子を距離順で取得（上位10件に制限して処理を高速化）
 	// current_ride_id IS NULL で空き椅子を判定
+	ride := rides[0] // 1件のみ取得しているので最初のライドを使用
 	chairs := []Chair{}
 	chairQuery := `
 		SELECT c.*, c.latest_latitude, c.latest_longitude
@@ -146,8 +147,15 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		AND c.latest_latitude IS NOT NULL
 		AND c.latest_longitude IS NOT NULL
 		AND c.current_ride_id IS NULL
+		ORDER BY 
+			(c.latest_latitude - ?) * (c.latest_latitude - ?) + 
+			(c.latest_longitude - ?) * (c.latest_longitude - ?)
+		LIMIT 10
 	`
-	if err := db.SelectContext(ctx, &chairs, chairQuery); err != nil {
+	if err := db.SelectContext(ctx, &chairs, chairQuery,
+		ride.PickupLatitude, ride.PickupLatitude,
+		ride.PickupLongitude, ride.PickupLongitude,
+	); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
