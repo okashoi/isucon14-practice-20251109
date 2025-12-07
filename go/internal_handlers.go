@@ -3,6 +3,7 @@ package main
 import (
 	"math"
 	"net/http"
+	"time"
 )
 
 // 最小費用流アルゴリズム用のエッジ構造体
@@ -169,15 +170,23 @@ func internalGetMatching(w http.ResponseWriter, r *http.Request) {
 		mcf.AddEdge(source, rideNode, 1, 0)
 	}
 
-	// rides → chairs (容量1, コスト=平方距離)
+	// rides → chairs (容量1, コスト=平方距離を待ち時間で調整)
+	now := time.Now()
 	for i, ride := range rides {
 		rideNode := i + 1
+		// 待ち時間（秒）を計算
+		waitSeconds := now.Sub(ride.CreatedAt).Seconds()
+		// 待ち時間が長いほどコストを下げる係数（30秒ごとに半減）
+		waitFactor := 1.0 / (1.0 + waitSeconds/30.0)
+
 		for j, chair := range chairs {
 			chairNode := n + 1 + j
 			// 平方距離をコストとして使用
 			latDiff := int64(*chair.LatestLatitude - ride.PickupLatitude)
 			lonDiff := int64(*chair.LatestLongitude - ride.PickupLongitude)
-			cost := latDiff*latDiff + lonDiff*lonDiff
+			distCost := latDiff*latDiff + lonDiff*lonDiff
+			// 待ち時間で調整したコスト
+			cost := int64(float64(distCost) * waitFactor)
 			mcf.AddEdge(rideNode, chairNode, 1, cost)
 		}
 	}
